@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Frontrow Interview POC</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>Frontrow Interview POC</h1>
+          <p>Local AI-Brew-style interview session tester</p>
+        </div>
+        <div class="status" id="status">idle</div>
+      </section>
+
+      <section class="layout">
+        <aside class="panel setup">
+          <h2>Setup</h2>
+
+          <label>
+            API Base
+            <input id="apiBase" value="http://localhost:8000/api/v1" />
+          </label>
+
+          <label>
+            WS Base
+            <input id="wsBase" value="ws://localhost:8000/api/v1" />
+          </label>
+
+          <label>
+            Candidate ID
+            <input id="candidateId" value="candidate_001" />
+          </label>
+
+          <label>
+            Role Title
+            <input id="roleTitle" value="Python Backend Engineer" />
+          </label>
+
+          <label>
+            Role Preset
+            <select id="rolePreset">
+              <option value="software" selected>Software backend</option>
+              <option value="nurse">Emergency room nurse</option>
+              <option value="forklift">Forklift operator</option>
+              <option value="sales">Retail sales associate</option>
+            </select>
+          </label>
+
+          <label>
+            Interview Duration
+            <select id="durationMinutes">
+              <option value="2">2 minutes</option>
+              <option value="5">5 minutes</option>
+              <option value="10">10 minutes</option>
+              <option value="15">15 minutes</option>
+              <option value="20" selected>20 minutes</option>
+            </select>
+          </label>
+
+          <label>
+            Required Skills
+            <textarea id="requiredSkills" rows="4">Python concurrency
+FastAPI
+API design
+PostgreSQL
+Redis
+Production debugging
+AI model integration</textarea>
+          </label>
+
+          <label>
+            Job Description Summary
+            <textarea id="jobSummary" rows="5">We need a backend engineer who can build FastAPI services, design REST APIs, work with PostgreSQL and Redis, debug production issues, and integrate AI model APIs.</textarea>
+          </label>
+
+          <label>
+            Resume Summary
+            <textarea id="resumeSummary" rows="5">Candidate has 3 years of backend experience with Python, FastAPI, PostgreSQL, Redis, Docker, and claims to have worked on AI model deployment.</textarea>
+          </label>
+
+          <div class="button-row">
+            <button id="createBtn">Create + Start</button>
+            <button id="connectBtn" disabled>Connect WS</button>
+          </div>
+
+          <label>
+            Interview ID
+            <input id="interviewId" placeholder="Created interview id" />
+          </label>
+
+          <div class="button-row">
+            <button id="completeBtn" disabled>Complete</button>
+            <button id="reportBtn" disabled>Fetch Report</button>
+          </div>
+        </aside>
+
+        <section class="panel interview">
+          <div class="interview-head">
+            <div>
+              <h2>Interview</h2>
+              <p id="metaLine">No session yet.</p>
+            </div>
+            <button id="clearBtn" class="secondary">Clear Chat</button>
+          </div>
+
+          <div id="messages" class="messages"></div>
+
+          <form id="answerForm" class="answer-form">
+            <textarea
+              id="answerText"
+              rows="4"
+              placeholder="Optional fallback transcript / notes..."
+              disabled
+            ></textarea>
+            <div class="button-row">
+              <button id="sendBtn" type="submit" disabled>Send Answer</button>
+              <button id="recordBtn" type="button" disabled>Open Mic</button>
+              <button id="stopRecordBtn" type="button" disabled>Stop + Send</button>
+              <button id="dontKnowBtn" type="button" disabled>I don't know</button>
+              <button id="strongBtn" type="button" disabled>Strong Sample</button>
+            </div>
+            <div class="recording-line">
+              <span id="recordingStatus">No recording</span>
+              <audio id="answerPreview" controls></audio>
+            </div>
+          </form>
+        </section>
+
+        <aside class="panel report">
+          <h2>Report</h2>
+          <div id="reportOutput" class="report-output">No report yet.</div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

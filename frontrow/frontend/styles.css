@@ -1,0 +1,294 @@
+:root {
+  color-scheme: light;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #f4f6f8;
+  color: #17202a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 6px;
+  background: #1668dc;
+  color: #fff;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #aab4c0;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: #e6eaf0;
+  color: #26313d;
+}
+
+.shell {
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+.topbar p,
+.interview-head p {
+  color: #667385;
+  margin-top: 4px;
+}
+
+.status {
+  border-radius: 999px;
+  background: #e8eef7;
+  color: #234366;
+  padding: 8px 12px;
+  min-width: 110px;
+  text-align: center;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(420px, 1fr) minmax(260px, 360px);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #d9e0e8;
+  border-radius: 8px;
+  padding: 16px;
+  min-height: 0;
+}
+
+.setup,
+.report {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #4d5b6a;
+  font-size: 13px;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #cdd6e0;
+  border-radius: 6px;
+  color: #17202a;
+  padding: 9px 10px;
+  background: #fff;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.interview {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 120px);
+}
+
+.interview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.messages {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid #e0e6ee;
+  border-radius: 8px;
+  background: #f9fbfd;
+  padding: 14px;
+}
+
+.message {
+  max-width: 82%;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  line-height: 1.45;
+}
+
+.message .label {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.audio-block {
+  margin-top: 10px;
+  border-top: 1px solid rgba(22, 104, 220, 0.16);
+  padding-top: 8px;
+}
+
+.audio-label {
+  color: #31567f;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.voice-wait {
+  color: #667385;
+  font-size: 12px;
+}
+
+.message audio.model-audio {
+  display: block;
+  width: min(360px, 100%);
+  height: 34px;
+}
+
+.message.interviewer {
+  background: #eaf3ff;
+  border: 1px solid #c9dfff;
+}
+
+.message.candidate {
+  margin-left: auto;
+  background: #eaf8ef;
+  border: 1px solid #c7ead2;
+}
+
+.message.system {
+  max-width: 100%;
+  background: #fff8e6;
+  border: 1px solid #f0dfad;
+}
+
+.meta {
+  margin-top: 8px;
+  color: #637083;
+  font-size: 12px;
+}
+
+.answer-form {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.recording-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #667385;
+  font-size: 13px;
+}
+
+.recording-line audio {
+  width: min(340px, 100%);
+  height: 34px;
+}
+
+.report-output {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+  background: #f9fbfd;
+  border: 1px solid #e0e6ee;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+}
+
+.report-score {
+  border-bottom: 1px solid #e0e6ee;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+}
+
+.report-score strong {
+  display: block;
+  font-size: 28px;
+}
+
+.report-section {
+  border-top: 1px solid #e0e6ee;
+  padding-top: 10px;
+  margin-top: 10px;
+}
+
+.report-section h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.report-item {
+  background: #fff;
+  border: 1px solid #e0e6ee;
+  border-radius: 6px;
+  margin: 7px 0;
+  padding: 8px;
+}
+
+.report-item b {
+  display: block;
+  margin-bottom: 3px;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .interview {
+    min-height: 620px;
+  }
+}
