@@ -42,7 +42,8 @@ async def test_generate_report_heuristic():
     assert report.evidence_count >= 0
 
 
-def test_build_state():
+@pytest.mark.asyncio
+async def test_build_state():
     """Test that ReportInput is correctly converted to InterviewState."""
     report_input = ReportInput(
         job_title="Data Scientist",
@@ -55,7 +56,7 @@ def test_build_state():
             ),
         ],
     )
-    state = build_state(report_input)
+    state = await build_state(report_input)
 
     assert state.role.title == "Data Scientist"
     assert state.role.seniority == "Senior"
@@ -73,3 +74,25 @@ def test_report_input_validation():
             job_title="Engineer",
             turns=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_report_with_audio_fallback():
+    """When audio is present but no Gemini key, falls back to text heuristic."""
+    report_input = ReportInput(
+        job_title="Backend Engineer",
+        seniority="Mid",
+        required_skills=["Python", "SQL"],
+        turns=[
+            TurnInput(
+                question_text="Tell me about Python.",
+                answer_text="I built microservices with FastAPI and handled async operations.",
+                answer_audio_base64="SGVsbG8gV29ybGQ=",  # dummy base64
+                audio_mime_type="audio/webm",
+            ),
+        ],
+    )
+    config = ReportEngineConfig(use_gemini=False)
+    report = await generate_report(report_input, config)
+    assert report.interview_id.startswith("int_")
+    assert report.fit_score >= 0

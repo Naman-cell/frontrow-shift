@@ -22,8 +22,18 @@ async def generate_report(
     """
     config = config or ReportEngineConfig()
 
-    # Build internal state from SkillBrew input
-    state = build_state(report_input)
+    # Create audio analyzer if Gemini is configured
+    audio_analyzer = None
+    if config.use_gemini and config.gemini_api_key:
+        from report_engine.audio_analyzer import GeminiAudioAnalyzer
+
+        audio_analyzer = GeminiAudioAnalyzer(
+            api_key=config.gemini_api_key,
+            model=config.gemini_model,
+        )
+
+    # Build internal state (with Gemini audio analysis if available)
+    state = await build_state(report_input, audio_analyzer=audio_analyzer)
 
     # Create scoring service
     if config.use_gemini and config.gemini_api_key:

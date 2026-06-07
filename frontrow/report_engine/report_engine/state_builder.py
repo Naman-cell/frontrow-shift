@@ -1,7 +1,10 @@
 """Translate ReportInput (SkillBrew's flat format) into InterviewState."""
 
+from __future__ import annotations
+
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from report_engine.models import (
     AnswerAnalysis,
@@ -16,9 +19,20 @@ from report_engine.models import (
     Rubric,
 )
 
+if TYPE_CHECKING:
+    from report_engine.audio_analyzer import GeminiAudioAnalyzer
 
-def build_state(report_input: ReportInput) -> InterviewState:
-    """Convert SkillBrew's ReportInput into an InterviewState for the pipeline."""
+
+async def build_state(
+    report_input: ReportInput,
+    audio_analyzer: "GeminiAudioAnalyzer | None" = None,
+) -> InterviewState:
+    """Convert SkillBrew's ReportInput into an InterviewState for the pipeline.
+
+    When *audio_analyzer* is provided and a turn carries ``answer_audio_base64``,
+    the answer is analyzed by Gemini multimodal audio.  Otherwise the existing
+    text heuristic is used as a fallback.
+    """
     interview_id = f"int_{uuid.uuid4().hex[:16]}"
 
     # Build resume summary from resume_json
@@ -54,8 +68,6 @@ def build_state(report_input: ReportInput) -> InterviewState:
             audio_mime_type=turn_input.audio_mime_type,
         )
 
-        # Basic answer analysis from text (SkillBrew provides pre-processed answers)
-        quality = _assess_quality(turn_input.answer_text)
         # Pick the most likely skill for this turn (round-robin through skills)
         skill_ids = list(state.skill_map.skills.keys())
         target_skill_id = skill_ids[idx % len(skill_ids)] if skill_ids else "general"
@@ -65,15 +77,32 @@ def build_state(report_input: ReportInput) -> InterviewState:
             else "General"
         )
 
-        analysis = AnswerAnalysis(
-            quality=quality,
-            intent=CandidateIntent.ANSWERED,
-            transcript=turn_input.answer_text,
-            summary=turn_input.answer_text[:200] if turn_input.answer_text else "",
-            target_skill_id=target_skill_id,
-            target_skill_label=target_skill_label,
-            confidence=0.6,
-        )
+        # Use Gemini audio analysis when audio is present and analyzer is available;
+        # fall back to the text heuristic otherwise.
+        if turn_input.answer_audio_base64 and audio_analyzer is not None:
+            analysis = await audio_analyzer.analyze_answer(
+                audio_base64=turn_input.answer_audio_base64,
+                audio_mime_type=turn_input.audio_mime_type or "audio/webm",
+                question=turn_input.question_text,
+                target_skill_id=target_skill_id,
+                target_skill_label=target_skill_label,
+                transcript=turn_input.answer_text,
+                state=state,
+            )
+            # Gemini may redirect attribution to a different skill.
+            target_skill_id = analysis.target_skill_id
+            target_skill_label = analysis.target_skill_label
+        else:
+            quality = _assess_quality(turn_input.answer_text)
+            analysis = AnswerAnalysis(
+                quality=quality,
+                intent=CandidateIntent.ANSWERED,
+                transcript=turn_input.answer_text,
+                summary=turn_input.answer_text[:200] if turn_input.answer_text else "",
+                target_skill_id=target_skill_id,
+                target_skill_label=target_skill_label,
+                confidence=0.6,
+            )
 
         turn = InterviewTurn(
             turn_id=turn_id,
@@ -91,7 +120,7 @@ def build_state(report_input: ReportInput) -> InterviewState:
         if target_skill_id in state.skill_map.skills:
             skill_node = state.skill_map.skills[target_skill_id]
             skill_node.attempts += 1
-            skill_node.current_score = max(skill_node.current_score, _quality_to_score(quality))
+            skill_node.current_score = max(skill_node.current_score, _quality_to_score(analysis.quality))
             skill_node.confidence = min(1.0, skill_node.confidence + 0.2)
 
     return state
