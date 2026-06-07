@@ -24,7 +24,7 @@ This POC addresses those issues by introducing:
 - A Haystack turn-processing graph.
 - Structured `InterviewState` instead of raw transcript append-only memory.
 - Gemini audio understanding for candidate responses.
-- Gemini TTS for interviewer voice.
+- Azure Speech raw PCM streaming for interviewer voice.
 - Candidate intent classification.
 - Policy-backed next-move planning.
 - Sliding-window conversation summary and open threads.
@@ -69,10 +69,12 @@ ACTIVE_STATE_BACKEND=redis
 
 GEMINI_API_KEY=your_key_here
 GEMINI_AUDIO_MODEL=gemini-2.5-flash
-GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
-GEMINI_TTS_VOICE=Kore
 ENABLE_GEMINI=true
-ENABLE_TTS=true
+
+AZURE_SPEECH_KEY=your_azure_speech_key_here
+AZURE_SPEECH_REGION=southeastasia
+AZURE_TTS_VOICE=en-US-AndrewMultilingualNeural
+AZURE_TTS_OUTPUT_FORMAT=raw-24khz-16bit-mono-pcm
 
 REDIS_URL=redis://localhost:6379/0
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/frontrow
@@ -89,7 +91,7 @@ docker compose up -d
 Start backend:
 
 ```bash
-uv run uvicorn app.main:app
+uv run python -m uvicorn app.main:app
 ```
 
 Serve frontend:
@@ -202,24 +204,33 @@ Outbound WebSocket question payload:
 }
 ```
 
-Outbound WebSocket audio payload:
+Live voice WebSocket:
+
+```text
+ws://localhost:8000/api/v1/voice/live
+```
+
+Inbound voice payload:
 
 ```json
 {
-  "message_type": "audio",
-  "query_asked": "Question text",
-  "completed": false,
-  "interview_duration": 1200,
-  "audio_base64": "...",
-  "audio_mime_type": "audio/wav",
-  "meta": {
-    "tts": "google",
-    "tts_error": null
-  }
+  "text": "Question text to speak"
 }
 ```
 
-The text question is sent first. Gemini TTS is sent later as a separate message so the user is not blocked waiting for voice synthesis.
+Outbound voice control messages are JSON:
+
+```json
+{
+  "type": "voice_start",
+  "sample_rate": 24000,
+  "mime_type": "audio/pcm;rate=24000"
+}
+```
+
+Audio chunks are sent as binary WebSocket frames containing raw 16-bit
+little-endian mono PCM at 24 kHz. The browser schedules those chunks through
+Web Audio as they arrive. It does not wait for a complete MP3/WAV file.
 
 ## End-To-End Interview Lifecycle
 
@@ -237,16 +248,17 @@ The text question is sent first. Gemini TTS is sent later as a separate message 
 6. Candidate starts interview.
 7. WebSocket connects.
 8. Current question is sent immediately.
-9. Gemini TTS is generated asynchronously and sent as a second WebSocket event.
-10. Candidate opens mic.
-11. Browser captures audio, detects silence, stops, and sends audio to backend.
-12. Haystack turn pipeline processes answer.
-13. Updated structured state is saved to Redis.
-14. Next text question is sent immediately.
-15. Audio follows asynchronously.
-16. Interview ends by manual completion, client overtime, user leave, cheating flag, repeated disengagement, or time-aware closing.
-17. Report generation reads final state.
-18. Report is saved to Postgres.
+9. Frontend sends the question text to `/voice/live`.
+10. Azure Speech streams raw PCM chunks back to the frontend.
+11. Candidate opens mic.
+12. Browser captures audio, detects silence, stops, and sends audio to backend.
+13. Haystack turn pipeline processes answer.
+14. Updated structured state is saved to Redis.
+15. Next text question is sent immediately.
+16. Azure Speech voice streams in parallel.
+17. Interview ends by manual completion, client overtime, user leave, cheating flag, repeated disengagement, or time-aware closing.
+18. Report generation reads final state.
+19. Report is saved to Postgres.
 
 ## State Management
 
@@ -646,32 +658,42 @@ Gemini is used for:
 - next question suggestion
 - fallback next question generation
 - opening question generation
-- interviewer TTS
 
-Models:
+Gemini model:
 
 ```text
 GEMINI_AUDIO_MODEL=gemini-2.5-flash
-GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
+```
+
+Azure Speech is used for:
+
+- interviewer voice streaming
+
+Azure Speech settings:
+
+```text
+AZURE_SPEECH_KEY=your_azure_speech_key_here
+AZURE_SPEECH_REGION=southeastasia
+AZURE_TTS_VOICE=en-US-AndrewMultilingualNeural
+AZURE_TTS_OUTPUT_FORMAT=raw-24khz-16bit-mono-pcm
 ```
 
 Concurrency:
 
 ```text
 model_semaphore = 4
-tts_semaphore = 2
 ```
 
-The semaphores prevent provider overload. They do not magically make one model call faster. Latency is reduced mostly by:
+The semaphore prevents provider overload. It does not magically make one model call faster. Latency is reduced mostly by:
 
 - reusing `suggested_next_question` from answer understanding
-- sending text before TTS
-- making TTS asynchronous
-- avoiding empty audio events
+- sending text to the interview UI immediately
+- using Azure Speech for raw PCM voice chunks
+- playing chunks through Web Audio instead of waiting for a complete audio file
 
 ## Audio Flow
 
-Current browser flow:
+Current browser/interview flow:
 
 1. User clicks `Open Mic`.
 2. Browser starts recording.
@@ -680,21 +702,22 @@ Current browser flow:
 5. Audio is sent to WebSocket.
 6. Gemini analyzes audio.
 7. Text question returns first.
-8. Gemini TTS audio returns later.
-9. UI attaches audio to the latest interviewer message.
+8. Frontend sends that question text to `/voice/live`.
+9. Azure Speech emits raw PCM frames.
+10. Browser schedules frames immediately with Web Audio.
 
-This is not true Gemini Live streaming yet.
+This is still turn-based for candidate input because the candidate microphone is
+sent after local silence detection. It is streaming for interviewer voice output.
 
-True realtime conversation would need:
+True full-duplex conversation would need:
 
 - streaming microphone frames to backend
-- provider streaming API or Gemini Live-style session
 - partial transcription / partial intent updates
-- streaming TTS or duplex audio
 - interruption/barge-in handling
 - turn boundary detection server-side
 
-The current POC is a step toward that experience, but it is still turn-based.
+The current POC is a step toward that experience: interviewer speech streams,
+but candidate speech is still chunked per answer.
 
 ## Report Rubric
 
@@ -774,7 +797,7 @@ Current features:
 - create/start interview
 - connect WebSocket
 - render interviewer text
-- attach Gemini voice asynchronously
+- stream Azure Speech voice through Web Audio
 - open mic
 - silence auto-stop
 - send audio answer

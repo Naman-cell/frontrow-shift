@@ -1,7 +1,6 @@
 import os
 
 os.environ["ENABLE_GEMINI"] = "false"
-os.environ["ENABLE_TTS"] = "false"
 
 from fastapi.testclient import TestClient
 
@@ -53,7 +52,25 @@ def test_interview_e2e_over_rest_and_websocket() -> None:
 
             websocket.send_json(
                 {
+                    "message_type": "audio_chunk",
+                    "audio_stream_id": "stream_test_1",
+                    "audio_chunk_base64": "ZmFrZS1hdWRpby0x",
+                    "audio_mime_type": "audio/webm",
+                }
+            )
+            websocket.send_json(
+                {
+                    "message_type": "audio_chunk",
+                    "audio_stream_id": "stream_test_1",
+                    "audio_chunk_base64": "ZmFrZS1hdWRpby0y",
+                    "audio_mime_type": "audio/webm",
+                }
+            )
+            websocket.send_json(
+                {
+                    "message_type": "answer",
                     "text": "I am not sure, I do not know that Python topic well.",
+                    "audio_stream_id": "stream_test_1",
                     "user_leave": False,
                     "overtime": False,
                     "is_complete": False,

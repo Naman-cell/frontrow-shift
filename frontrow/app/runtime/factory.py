@@ -38,9 +38,6 @@ async def build_interview_session_manager(settings: Settings) -> InterviewSessio
         audio_service = GeminiAudioUnderstandingService(
             api_key=settings.gemini_api_key,
             audio_model=settings.gemini_audio_model,
-            tts_model=settings.gemini_tts_model,
-            tts_voice=settings.gemini_tts_voice,
-            enable_tts=settings.enable_tts,
         )
 
     manager = InterviewSessionManager(

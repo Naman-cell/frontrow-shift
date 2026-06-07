@@ -41,13 +41,17 @@ class NextMovePlanner:
             )
 
         if state.closing_question_sent:
+            closing_response = self._closing_response_after_candidate_space(state=state, analysis=analysis)
             return self._decision(
                 MoveType.WRAP_UP,
                 target_skill,
-                "Candidate had a chance to ask final questions, so close the interview.",
+                (
+                    "Candidate used the closing space, so address their final input "
+                    "and close the interview."
+                ),
                 evidence_used,
                 time_consideration="closing phase complete",
-                interviewer_response="Thanks, that gives me what I need. We can wrap here.",
+                interviewer_response=closing_response,
                 should_end_interview=True,
             )
 
@@ -371,6 +375,32 @@ class NextMovePlanner:
         ]
         return any(phrase in text for phrase in stop_phrases)
 
+    def _closing_response_after_candidate_space(
+        self,
+        *,
+        state: InterviewState,
+        analysis: AnswerAnalysis,
+    ) -> str:
+        response = (analysis.suggested_interviewer_response or "").strip()
+        if response and not _contains_placeholder(response):
+            return _with_signoff(_strip_trailing_question(response))
+        if analysis.intent == CandidateIntent.CANDIDATE_QUESTION:
+            return (
+                f"That's a fair question. Based on the role brief I have, this {state.role.title} "
+                f"role is centered on {_role_brief(state)}. The hiring team can share the exact "
+                "team expectations and next steps after this round. Thank you for taking the time today."
+            )
+        if analysis.quality in {
+            AnswerQuality.STRONG,
+            AnswerQuality.CONCRETE_EXPERIENCE,
+            AnswerQuality.PARTIAL,
+        }:
+            return _with_signoff(
+                "Thanks for adding that context. I have enough from this conversation, "
+                "so we can close here."
+            )
+        return "Thanks for your time today. We can close here."
+
     def _closing_buffer_seconds(self, state: InterviewState) -> int:
         total_seconds = max(state.duration_minutes * 60, 1)
         return max(45, min(self.policy.closing_buffer_seconds, int(total_seconds * 0.25)))
@@ -386,3 +416,45 @@ class NextMovePlanner:
     def _final_wrap_seconds(self, state: InterviewState) -> int:
         total_seconds = max(state.duration_minutes * 60, 1)
         return max(12, min(18, int(total_seconds * 0.06)))
+
+
+def _strip_trailing_question(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.endswith("?"):
+        return stripped
+    return stripped.rstrip("?").rstrip() + "."
+
+
+def _contains_placeholder(text: str) -> bool:
+    lowered = text.lower()
+    placeholder_markers = [
+        "[",
+        "]",
+        "briefly mention",
+        "e.g.",
+        "for example:",
+        "insert",
+        "placeholder",
+        "specific details here",
+    ]
+    return any(marker in lowered for marker in placeholder_markers)
+
+
+def _with_signoff(text: str) -> str:
+    stripped = text.strip()
+    lowered = stripped.lower()
+    if any(phrase in lowered for phrase in ["thank you", "thanks for", "thanks again"]):
+        return stripped
+    return f"{stripped} Thank you for taking the time today."
+
+
+def _role_brief(state: InterviewState) -> str:
+    jd_summary = " ".join(state.role.job_description_summary.split())
+    if jd_summary:
+        return jd_summary.rstrip(".")
+    skills = [skill.strip() for skill in state.role.required_skills if skill.strip()]
+    if not skills:
+        return "the core responsibilities described for the position"
+    if len(skills) == 1:
+        return skills[0]
+    return ", ".join(skills[:3])

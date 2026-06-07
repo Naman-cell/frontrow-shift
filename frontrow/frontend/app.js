@@ -1,6 +1,7 @@
 const els = {
   apiBase: document.querySelector("#apiBase"),
   wsBase: document.querySelector("#wsBase"),
+  voiceEnabled: document.querySelector("#voiceEnabled"),
   candidateId: document.querySelector("#candidateId"),
   roleTitle: document.querySelector("#roleTitle"),
   rolePreset: document.querySelector("#rolePreset"),
@@ -11,6 +12,8 @@ const els = {
   interviewId: document.querySelector("#interviewId"),
   status: document.querySelector("#status"),
   metaLine: document.querySelector("#metaLine"),
+  latencySummary: document.querySelector("#latencySummary"),
+  latencyOutput: document.querySelector("#latencyOutput"),
   messages: document.querySelector("#messages"),
   answerText: document.querySelector("#answerText"),
   reportOutput: document.querySelector("#reportOutput"),
@@ -33,13 +36,25 @@ let socket = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordedBlob = null;
-let activeInterviewerAudio = null;
 let sendRecordingOnStop = false;
-let lastInterviewerMessage = null;
+let currentAudioStreamId = null;
+let audioChunkUploads = [];
 let audioContext = null;
 let silenceMonitor = null;
 let countdownInterval = null;
 let interviewEndsAt = null;
+let voiceSocket = null;
+let voiceReadyPromise = null;
+let voiceReadyResolve = null;
+let voiceReadyReject = null;
+let streamingVoicePlayer = null;
+let activeVoiceBlock = null;
+let pendingCandidateMessage = null;
+let voiceDoneResolve = null;
+let voiceDoneReject = null;
+let activeLatencyTrace = null;
+let latencySequence = 0;
+const latencyTraces = [];
 
 const rolePresets = {
   software: {
@@ -159,39 +174,17 @@ function renderCountdown() {
   }
 }
 
-function addMessage(kind, text, meta = null, audio = null) {
+function addMessage(kind, text, meta = null) {
   const div = document.createElement("div");
   div.className = `message ${kind}`;
   const label = kind === "candidate" ? "Candidate" : kind === "system" ? "System" : "Interviewer";
-  const audioMarkup = audio
-    ? `
-      <div class="audio-block">
-        <div class="audio-label">Google Gemini voice</div>
-        <audio class="model-audio" controls preload="auto" src="${audio.url}"></audio>
-      </div>
-    `
-    : "";
   div.innerHTML = `
     <div class="label">${label}</div>
     <div>${escapeHtml(text || "")}</div>
-    ${audioMarkup}
     ${meta ? `<div class="meta">${escapeHtml(formatMeta(meta))}</div>` : ""}
   `;
   els.messages.appendChild(div);
-  if (kind === "interviewer") {
-    lastInterviewerMessage = div;
-  }
   els.messages.scrollTop = els.messages.scrollHeight;
-  if (audio?.autoplay) {
-    const audioEl = div.querySelector("audio");
-    if (activeInterviewerAudio && activeInterviewerAudio !== audioEl) {
-      activeInterviewerAudio.pause();
-    }
-    activeInterviewerAudio = audioEl;
-    audioEl?.play().catch(() => {
-      addMessage("system", "Google voice is ready. Press play on the audio control if autoplay was blocked.");
-    });
-  }
   return div;
 }
 
@@ -206,9 +199,9 @@ function escapeHtml(value) {
 
 function formatMeta(meta) {
   const parts = [];
-  if (meta.tts) parts.push(`voice: ${meta.tts}`);
   if (meta.move_type) parts.push(`move: ${meta.move_type}`);
   if (meta.target_skill) parts.push(`skill: ${meta.target_skill}`);
+  if (meta.reason) parts.push(`reason: ${meta.reason}`);
   return parts.join(" | ");
 }
 
@@ -287,6 +280,7 @@ function connectSocket() {
     setStatus("connected");
     setChatEnabled(true);
     addMessage("system", "WebSocket connected.");
+    ensureVoiceSocket().catch((err) => addMessage("system", err.message));
   });
 
   socket.addEventListener("message", (event) => {
@@ -295,18 +289,19 @@ function connectSocket() {
       addMessage("system", `${payload.error}: ${JSON.stringify(payload.details || {})}`);
       return;
     }
-    if (payload.message_type === "audio") {
-      attachAudioPayload(payload);
-      return;
-    }
-    if (payload.query_asked || payload.reconnect) {
-      addInterviewerPayload(payload);
-    }
+    markBackendResponse(payload.meta || {});
+    updatePendingCandidateMessage(payload.meta || {});
+    const voiceDone = payload.query_asked || payload.reconnect
+      ? addInterviewerPayload(payload)
+      : Promise.resolve();
     if (payload.completed) {
-      setStatus("completed");
+      setStatus("wrapping up");
       setChatEnabled(false);
       stopCountdown();
-      addMessage("system", "Interview completed. Fetch report when ready.");
+      voiceDone.finally(() => {
+        setStatus("completed");
+        addMessage("system", "Interview completed. Fetch report when ready.");
+      });
     }
   });
 
@@ -324,69 +319,240 @@ function connectSocket() {
 function addInterviewerPayload(payload) {
   const question = payload.query_asked || payload.reconnect?.current_question || "";
   const meta = payload.meta || {};
-  const audio = payload.audio_base64
-    ? {
-        url: audioUrlFromBase64(
-          payload.audio_base64,
-          payload.audio_mime_type || "audio/wav"
-        ),
-        autoplay: true,
-      }
-    : null;
-  const message = question ? addMessage("interviewer", question, meta, audio) : null;
-  if (message && !audio) {
-    addAudioLoading(message);
-  }
-  if (meta.tts_error) {
-    addMessage("system", `Google Gemini TTS failed: ${meta.tts_error}`);
+  let voiceDone = Promise.resolve();
+  if (question) {
+    if (!activeLatencyTrace) {
+      startLatencyTrace("opening", { audioKb: 0 });
+      markBackendResponse(meta);
+    }
+    markLatency("questionDisplayedAt");
+    const message = addMessage("interviewer", question, meta);
+    voiceDone = streamAzureVoice(question, message).catch((err) => {
+      addMessage("system", err.message);
+    });
   }
   startCountdown(payload.reconnect?.remaining_seconds || payload.interview_duration);
+  return voiceDone;
 }
 
-function addAudioLoading(message) {
-  const div = document.createElement("div");
-  div.className = "audio-block audio-loading";
-  div.innerHTML = `
-    <div class="audio-label">Google Gemini voice</div>
-    <div class="voice-wait">Preparing voice...</div>
+async function streamAzureVoice(text, message) {
+  if (!els.voiceEnabled?.checked || !text) return;
+
+  const audioBlock = document.createElement("div");
+  audioBlock.className = "audio-block";
+  audioBlock.innerHTML = `
+    <div class="audio-label">Azure voice</div>
+    <div class="voice-wait">Opening voice stream...</div>
   `;
-  message.appendChild(div);
+  message.appendChild(audioBlock);
+  activeVoiceBlock = audioBlock;
+  await ensureVoiceSocket();
+  ensureStreamingPlayer().reset();
+  updateVoiceBlock("Streaming voice...");
+  markLatency("voiceRequestedAt");
+  if (voiceDoneResolve) {
+    voiceDoneResolve();
+    voiceDoneResolve = null;
+    voiceDoneReject = null;
+  }
+  const done = new Promise((resolve, reject) => {
+    voiceDoneResolve = resolve;
+    voiceDoneReject = reject;
+  });
+  voiceSocket.send(JSON.stringify({ text }));
+  return done;
 }
 
-function attachAudioPayload(payload) {
-  if (payload.meta?.tts_error) {
-    const existing = lastInterviewerMessage?.querySelector(".audio-block");
-    existing?.remove();
-    addMessage("system", `Google Gemini TTS failed: ${payload.meta.tts_error}`);
+function ensureVoiceSocket() {
+  if (!els.voiceEnabled?.checked) return Promise.resolve();
+  if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) return Promise.resolve();
+  if (voiceReadyPromise) return voiceReadyPromise;
+
+  voiceReadyPromise = new Promise((resolve, reject) => {
+    voiceReadyResolve = resolve;
+    voiceReadyReject = reject;
+    voiceSocket = new WebSocket(wsUrl("/voice/live"));
+    voiceSocket.binaryType = "arraybuffer";
+
+    voiceSocket.addEventListener("message", (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        ensureStreamingPlayer().push(event.data);
+        return;
+      }
+      let payload = {};
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      handleVoiceControlMessage(payload);
+    });
+
+    voiceSocket.addEventListener("open", () => {
+      updateVoiceBlock("Voice stream connected.");
+    });
+
+    voiceSocket.addEventListener("close", () => {
+      if (voiceReadyReject) {
+        voiceReadyReject(new Error("Azure voice socket closed before it was ready."));
+      }
+      voiceSocket = null;
+      voiceReadyPromise = null;
+      voiceReadyResolve = null;
+      voiceReadyReject = null;
+    });
+
+    voiceSocket.addEventListener("error", () => {
+      voiceReadyPromise = null;
+      voiceReadyResolve = null;
+      voiceReadyReject = null;
+      reject(new Error("Azure voice socket error."));
+    });
+  });
+
+  return voiceReadyPromise;
+}
+
+function handleVoiceControlMessage(payload) {
+  if (payload.type === "ready") {
+    ensureStreamingPlayer(payload.sample_rate || 24000);
+    updateVoiceBlock("Voice stream ready.");
+    if (voiceReadyResolve) voiceReadyResolve();
+    voiceReadyResolve = null;
+    voiceReadyReject = null;
     return;
   }
-  if (!payload.audio_base64 || !lastInterviewerMessage) return;
-  const existing = lastInterviewerMessage.querySelector(".audio-block");
-  existing?.remove();
-  const audioUrl = audioUrlFromBase64(payload.audio_base64, payload.audio_mime_type || "audio/wav");
-  const wrapper = document.createElement("div");
-  wrapper.className = "audio-block";
-  wrapper.innerHTML = `
-    <div class="audio-label">Google Gemini voice</div>
-    <audio class="model-audio" controls preload="auto" src="${audioUrl}"></audio>
-  `;
-  lastInterviewerMessage.appendChild(wrapper);
-  const audioEl = wrapper.querySelector("audio");
-  if (activeInterviewerAudio && activeInterviewerAudio !== audioEl) {
-    activeInterviewerAudio.pause();
+  if (payload.type === "voice_start") {
+    ensureStreamingPlayer(payload.sample_rate || 24000).reset();
+    markLatency("voiceStartAt");
+    updateVoiceBlock("Speaking...");
+    return;
   }
-  activeInterviewerAudio = audioEl;
-  audioEl?.play().catch(() => {});
+  if (payload.type === "voice_end") {
+    markLatency("voiceEndAt");
+    updateVoiceBlock("Voice stream complete.");
+    if (voiceDoneResolve) {
+      voiceDoneResolve();
+      voiceDoneResolve = null;
+      voiceDoneReject = null;
+    }
+    completeLatencyTrace();
+    return;
+  }
+  if (payload.type === "voice_cancelled") {
+    updateVoiceBlock("Voice stream interrupted.");
+    if (voiceDoneResolve) {
+      voiceDoneResolve();
+      voiceDoneResolve = null;
+      voiceDoneReject = null;
+    }
+    return;
+  }
+  if (payload.type === "error") {
+    const message = payload.message || "Azure voice failed.";
+    updateVoiceBlock(message);
+    if (voiceDoneReject) {
+      voiceDoneReject(new Error(message));
+      voiceDoneResolve = null;
+      voiceDoneReject = null;
+    }
+    if (voiceReadyReject) {
+      voiceReadyReject(new Error(message));
+      voiceReadyReject = null;
+      voiceReadyResolve = null;
+    } else {
+      addMessage("system", message);
+    }
+  }
 }
 
-function audioUrlFromBase64(base64, mimeType) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
+function updateVoiceBlock(text) {
+  if (!activeVoiceBlock) return;
+  activeVoiceBlock.innerHTML = `
+    <div class="audio-label">Azure voice</div>
+    <div class="voice-wait">${escapeHtml(text)}</div>
+  `;
+}
+
+function ensureStreamingPlayer(sampleRate = 24000) {
+  if (!streamingVoicePlayer || streamingVoicePlayer.sampleRate !== sampleRate) {
+    streamingVoicePlayer = new PcmStreamPlayer(sampleRate);
   }
-  const blob = new Blob([bytes], { type: mimeType });
-  return URL.createObjectURL(blob);
+  streamingVoicePlayer.resume().catch(() => {});
+  return streamingVoicePlayer;
+}
+
+class PcmStreamPlayer {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.audioContext = null;
+    this.nextStartTime = 0;
+    this.sources = [];
+    this.pendingByte = null;
+  }
+
+  async resume() {
+    if (!this.audioContext) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      this.audioContext = new AudioContextClass({ sampleRate: this.sampleRate });
+      this.nextStartTime = this.audioContext.currentTime;
+    }
+    if (this.audioContext.state === "suspended") {
+      await this.audioContext.resume();
+    }
+  }
+
+  reset() {
+    for (const source of this.sources) {
+      try {
+        source.stop();
+      } catch {
+        // Already stopped.
+      }
+    }
+    this.sources = [];
+    this.pendingByte = null;
+    if (this.audioContext) {
+      this.nextStartTime = this.audioContext.currentTime;
+    }
+  }
+
+  push(arrayBuffer) {
+    if (!this.audioContext) return;
+    markFirstAudioByte();
+    let bytes = new Uint8Array(arrayBuffer);
+    if (this.pendingByte !== null) {
+      const merged = new Uint8Array(bytes.length + 1);
+      merged[0] = this.pendingByte;
+      merged.set(bytes, 1);
+      bytes = merged;
+      this.pendingByte = null;
+    }
+    if (bytes.length % 2 === 1) {
+      this.pendingByte = bytes[bytes.length - 1];
+      bytes = bytes.slice(0, -1);
+    }
+    if (bytes.length === 0) return;
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const samples = new Float32Array(bytes.length / 2);
+    for (let i = 0; i < samples.length; i += 1) {
+      samples[i] = view.getInt16(i * 2, true) / 32768;
+    }
+    const buffer = this.audioContext.createBuffer(1, samples.length, this.sampleRate);
+    buffer.getChannelData(0).set(samples);
+    const source = this.audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.audioContext.destination);
+    const now = this.audioContext.currentTime;
+    if (this.nextStartTime < now) this.nextStartTime = now;
+    source.start(this.nextStartTime);
+    this.nextStartTime += buffer.duration;
+    this.sources.push(source);
+    source.addEventListener("ended", () => {
+      this.sources = this.sources.filter((item) => item !== source);
+    });
+  }
 }
 
 async function blobToBase64(blob) {
@@ -404,13 +570,18 @@ async function sendAnswer(text, flags = {}) {
   }
   let audioBase64 = null;
   let audioMimeType = null;
-  if (recordedBlob) {
+  if (currentAudioStreamId && audioChunkUploads.length) {
+    await Promise.allSettled(audioChunkUploads);
+    audioMimeType = recordedBlob?.type || mediaRecorder?.mimeType || "audio/webm";
+  } else if (recordedBlob) {
     audioBase64 = await blobToBase64(recordedBlob);
     audioMimeType = recordedBlob.type || "audio/webm";
   }
   const payload = {
+    message_type: "answer",
     text,
     audio_ref: null,
+    audio_stream_id: currentAudioStreamId,
     audio_base64: audioBase64,
     audio_mime_type: audioMimeType,
     user_leave: false,
@@ -418,17 +589,152 @@ async function sendAnswer(text, flags = {}) {
     is_complete: false,
     ...flags,
   };
+  const audioKb = recordedBlob ? Math.round(recordedBlob.size / 1024) : 0;
+  startLatencyTrace(recordedBlob ? "audio" : "text", { audioKb });
   socket.send(JSON.stringify(payload));
   if (recordedBlob) {
-    addMessage("candidate", text || "[audio answer submitted]", {
+    pendingCandidateMessage = addMessage("candidate", text || "[audio answer submitted]", {
       move_type: "audio",
       reason: `${Math.round(recordedBlob.size / 1024)} KB ${audioMimeType}`,
     });
   } else if (text) {
-    addMessage("candidate", text);
+    pendingCandidateMessage = addMessage("candidate", text);
   }
   resetRecording();
   els.answerText.value = "";
+}
+
+function startLatencyTrace(trigger, extra = {}) {
+  activeLatencyTrace = {
+    id: ++latencySequence,
+    trigger,
+    startedAt: performance.now(),
+    wallClock: new Date().toLocaleTimeString(),
+    audioKb: extra.audioKb || 0,
+    answerSentAt: performance.now(),
+    backendResponseAt: null,
+    questionDisplayedAt: null,
+    voiceRequestedAt: null,
+    voiceStartAt: null,
+    firstAudioByteAt: null,
+    voiceEndAt: null,
+    backendTurnMs: null,
+    backendDetail: "",
+    status: "waiting",
+  };
+  latencyTraces.unshift(activeLatencyTrace);
+  if (latencyTraces.length > 12) latencyTraces.pop();
+  renderLatency();
+}
+
+function markLatency(field) {
+  if (!activeLatencyTrace || activeLatencyTrace[field]) return;
+  activeLatencyTrace[field] = performance.now();
+  renderLatency();
+}
+
+function markBackendResponse(meta) {
+  if (!activeLatencyTrace) return;
+  markLatency("backendResponseAt");
+  const latency = meta?.latency_ms || {};
+  const backendTotal = latency.backend_total;
+  const turnPipeline = latency.turn_pipeline;
+  const displayedBackend = Number.isFinite(Number(backendTotal)) ? backendTotal : turnPipeline;
+  if (Number.isFinite(Number(displayedBackend))) {
+    activeLatencyTrace.backendTurnMs = Number(displayedBackend);
+  }
+  activeLatencyTrace.backendDetail = formatBackendLatencyDetail(latency);
+  renderLatency();
+}
+
+function markFirstAudioByte() {
+  if (!activeLatencyTrace || activeLatencyTrace.firstAudioByteAt) return;
+  activeLatencyTrace.firstAudioByteAt = performance.now();
+  renderLatency();
+}
+
+function completeLatencyTrace() {
+  if (!activeLatencyTrace) return;
+  activeLatencyTrace.status = "done";
+  renderLatency();
+  activeLatencyTrace = null;
+}
+
+function msSince(trace, field) {
+  if (!trace?.[field]) return "—";
+  return `${Math.max(0, Math.round(trace[field] - trace.answerSentAt))} ms`;
+}
+
+function msBetween(trace, startField, endField) {
+  if (!trace?.[startField] || !trace?.[endField]) return "—";
+  return `${Math.max(0, Math.round(trace[endField] - trace[startField]))} ms`;
+}
+
+function renderLatency() {
+  if (!els.latencyOutput) return;
+  const latest = latencyTraces[0];
+  if (latest) {
+    const total = latest.voiceEndAt
+      ? msSince(latest, "voiceEndAt")
+      : latest.firstAudioByteAt
+        ? `${msSince(latest, "firstAudioByteAt")} to first audio`
+        : latest.backendResponseAt
+          ? `${msSince(latest, "backendResponseAt")} to text`
+          : "waiting";
+    els.latencySummary.textContent = `Turn ${latest.id}: ${total}`;
+  }
+  els.latencyOutput.innerHTML = latencyTraces
+    .map((trace) => `
+      <div class="latency-row">
+        ${latencyCell(`#${trace.id}`, `${trace.trigger}${trace.audioKb ? ` · ${trace.audioKb} KB` : ""}`)}
+        ${latencyCell("Backend", trace.backendTurnMs ? `${trace.backendTurnMs} ms` : msSince(trace, "backendResponseAt"), trace.backendDetail)}
+        ${latencyCell("Text shown", msSince(trace, "questionDisplayedAt"))}
+        ${latencyCell("TTS start", msSince(trace, "voiceStartAt"))}
+        ${latencyCell("1st audio", msSince(trace, "firstAudioByteAt"))}
+        ${latencyCell("Speak total", msBetween(trace, "voiceStartAt", "voiceEndAt"))}
+      </div>
+    `)
+    .join("");
+}
+
+function latencyCell(label, value, detail = "") {
+  return `
+    <div class="latency-cell">
+      <strong>${escapeHtml(value)}</strong>
+      <span>${escapeHtml(label)}</span>
+      ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+    </div>
+  `;
+}
+
+function formatBackendLatencyDetail(latency) {
+  const parts = [];
+  const add = (label, key) => {
+    const value = latency?.[key];
+    if (Number.isFinite(Number(value))) parts.push(`${label} ${Math.round(Number(value))}`);
+  };
+  add("haystack", "turn_pipeline");
+  add("audio", "answer_understanding_ms");
+  add("question", "question_generator_ms");
+  add("save", "state_save");
+  return parts.length ? `${parts.join(" · ")} ms` : "";
+}
+
+function updatePendingCandidateMessage(meta) {
+  if (!pendingCandidateMessage) return;
+  const transcript = meta.candidate_transcript || "";
+  const summary = meta.candidate_answer_summary || "";
+  const displayText = transcript || summary;
+  if (!displayText) return;
+  pendingCandidateMessage.innerHTML = `
+    <div class="label">Candidate</div>
+    <div>${escapeHtml(displayText)}</div>
+    <div class="meta">${escapeHtml(formatMeta({
+      move_type: "analyzed_audio",
+      reason: transcript ? "Gemini transcript" : "Gemini answer summary",
+    }))}</div>
+  `;
+  pendingCandidateMessage = null;
 }
 
 async function startRecording() {
@@ -439,12 +745,17 @@ async function startRecording() {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   recordedChunks = [];
   recordedBlob = null;
+  currentAudioStreamId = crypto.randomUUID();
+  audioChunkUploads = [];
   const options = MediaRecorder.isTypeSupported("audio/webm")
     ? { mimeType: "audio/webm" }
     : undefined;
   mediaRecorder = new MediaRecorder(stream, options);
   mediaRecorder.addEventListener("dataavailable", (event) => {
-    if (event.data.size > 0) recordedChunks.push(event.data);
+    if (event.data.size > 0) {
+      recordedChunks.push(event.data);
+      audioChunkUploads.push(sendAudioChunk(event.data, currentAudioStreamId));
+    }
   });
   mediaRecorder.addEventListener("stop", () => {
     recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
@@ -478,10 +789,23 @@ function stopRecording() {
 function resetRecording() {
   recordedChunks = [];
   recordedBlob = null;
+  currentAudioStreamId = null;
+  audioChunkUploads = [];
   sendRecordingOnStop = false;
   stopSilenceMonitor();
   els.answerPreview.removeAttribute("src");
   els.recordingStatus.textContent = "No recording";
+}
+
+async function sendAudioChunk(blob, streamId) {
+  if (!streamId || !socket || socket.readyState !== WebSocket.OPEN) return;
+  const chunkBase64 = await blobToBase64(blob);
+  socket.send(JSON.stringify({
+    message_type: "audio_chunk",
+    audio_stream_id: streamId,
+    audio_chunk_base64: chunkBase64,
+    audio_mime_type: blob.type || mediaRecorder?.mimeType || "audio/webm",
+  }));
 }
 
 function monitorSilence(stream) {

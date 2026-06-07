@@ -21,6 +21,7 @@ class AnswerQuality(StrEnum):
 
 class CandidateIntent(StrEnum):
     ANSWERED = "answered"
+    CANDIDATE_QUESTION = "candidate_question"
     REFUSAL = "refusal"
     PIVOT_REQUEST = "pivot_request"
     CLARIFICATION_REQUEST = "clarification_request"
@@ -44,6 +45,7 @@ class CandidateAnswer(BaseModel):
 class AnswerAnalysis(BaseModel):
     quality: AnswerQuality
     intent: CandidateIntent = CandidateIntent.UNKNOWN
+    transcript: str = ""
     summary: str
     target_skill_id: str
     target_skill_label: str

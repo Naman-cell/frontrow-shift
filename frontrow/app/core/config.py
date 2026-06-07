@@ -20,13 +20,17 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
     gemini_audio_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_AUDIO_MODEL")
-    gemini_tts_model: str = Field(
-        default="gemini-3.1-flash-tts-preview",
-        validation_alias="GEMINI_TTS_MODEL",
-    )
-    gemini_tts_voice: str = Field(default="Kore", validation_alias="GEMINI_TTS_VOICE")
     enable_gemini: bool = Field(default=False, validation_alias="ENABLE_GEMINI")
-    enable_tts: bool = Field(default=False, validation_alias="ENABLE_TTS")
+    azure_speech_key: str = Field(default="", validation_alias="AZURE_SPEECH_KEY")
+    azure_speech_region: str = Field(default="", validation_alias="AZURE_SPEECH_REGION")
+    azure_tts_voice: str = Field(
+        default="en-US-AndrewMultilingualNeural",
+        validation_alias="AZURE_TTS_VOICE",
+    )
+    azure_tts_output_format: str = Field(
+        default="raw-24khz-16bit-mono-pcm",
+        validation_alias="AZURE_TTS_OUTPUT_FORMAT",
+    )
 
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     database_url: str = Field(

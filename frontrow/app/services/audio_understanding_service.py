@@ -1,7 +1,5 @@
 import base64
-import io
 import json
-import wave
 from asyncio import Semaphore
 from typing import Any
 
@@ -22,9 +20,6 @@ class AudioUnderstandingService:
         state: InterviewState | None = None,
     ) -> AnswerAnalysis:
         raise NotImplementedError
-
-    async def synthesize_question_audio(self, question: str) -> str | None:
-        return None
 
     async def generate_opening_question(self, *, state: InterviewState) -> str:
         return fallback_opening_question(state)
@@ -68,6 +63,10 @@ class MockAudioUnderstandingService(AudioUnderstandingService):
             quality = AnswerQuality.PARTIAL
             summary = "Candidate indicated a preferred or stronger area to discuss."
             intent = CandidateIntent.PIVOT_REQUEST
+        elif state and state.closing_question_sent and _looks_like_candidate_question(transcript):
+            quality = AnswerQuality.PARTIAL
+            summary = "Candidate asked a question or raised a concern during the closing space."
+            intent = CandidateIntent.CANDIDATE_QUESTION
         elif not transcript or any(phrase in transcript for phrase in ["i do not know", "i don't know", "not sure"]):
             quality = AnswerQuality.REFUSAL
             summary = "Candidate explicitly did not know or could not answer."
@@ -94,6 +93,7 @@ class MockAudioUnderstandingService(AudioUnderstandingService):
         return AnswerAnalysis(
             quality=quality,
             intent=intent,
+            transcript=answer.transcript,
             summary=summary,
             target_skill_id=target_skill_id,
             target_skill_label=target_skill_label,
@@ -105,7 +105,7 @@ class MockAudioUnderstandingService(AudioUnderstandingService):
 
 
 class GeminiAudioUnderstandingService(AudioUnderstandingService):
-    """Google GenAI-backed answer understanding and optional TTS.
+    """Google GenAI-backed answer understanding.
 
     The service keeps provider-specific code behind one boundary so the
     Haystack pipeline only sees normalized `AnswerAnalysis` objects.
@@ -116,19 +116,12 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
         *,
         api_key: str,
         audio_model: str,
-        tts_model: str,
-        tts_voice: str,
-        enable_tts: bool = False,
     ) -> None:
         from google import genai
 
         self.client = genai.Client(api_key=api_key)
         self.audio_model = audio_model
-        self.tts_model = tts_model
-        self.tts_voice = tts_voice
-        self.enable_tts = enable_tts
         self.model_semaphore = Semaphore(4)
-        self.tts_semaphore = Semaphore(2)
 
     async def analyze_answer(
         self,
@@ -167,6 +160,11 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
         return AnswerAnalysis(
             quality=quality,
             intent=intent,
+            transcript=(
+                _coerce_optional_text(parsed.get("answer_transcript"))
+                or _coerce_optional_text(parsed.get("transcript"))
+                or answer.transcript
+            ),
             summary=parsed.get("answer_summary")
             or parsed.get("summary")
             or "Candidate answer analyzed by Gemini.",
@@ -186,33 +184,6 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
             missing_expected_points=_coerce_str_list(parsed.get("missing_expected_points")),
         )
 
-    async def synthesize_question_audio(self, question: str) -> str | None:
-        if not self.enable_tts:
-            return None
-
-        from google.genai import types
-
-        async with self.tts_semaphore:
-            response = await self.client.aio.models.generate_content(
-                model=self.tts_model,
-                contents=question,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name=self.tts_voice,
-                            )
-                        )
-                    ),
-                ),
-            )
-        audio_bytes = _extract_audio_bytes(response)
-        if not audio_bytes:
-            return None
-        wav_bytes = _pcm_to_wav(audio_bytes)
-        return base64.b64encode(wav_bytes).decode("ascii")
-
     async def generate_question(
         self,
         *,
@@ -227,21 +198,7 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
                 analysis=analysis,
                 next_move=next_move,
             )
-        prompt = _question_generation_prompt(
-            role=state.role,
-            state=state,
-            analysis=analysis,
-            next_move=next_move,
-        )
-        async with self.model_semaphore:
-            response = await self.client.aio.models.generate_content(
-                model=self.audio_model,
-                contents=prompt,
-            )
-        parsed = _parse_json_response(getattr(response, "text", "") or "")
-        question = str(parsed.get("question") or "").strip()
-        if not question:
-            question = fallback_question_from_move(state=state, analysis=analysis, next_move=next_move)
+        question = fallback_question_from_move(state=state, analysis=analysis, next_move=next_move)
         return _ensure_conversational_bridge(
             question=question,
             analysis=analysis,
@@ -274,11 +231,13 @@ def _answer_analysis_prompt(
 You are analyzing one answer in a hiring interview.
 
 Return only valid JSON with:
+- answer_transcript: best-effort transcript of what the candidate actually said.
+  If the audio is unclear, return the most likely utterance and lower confidence.
 - answer_quality: one of strong, partial, weak, unclear, refusal, off_topic,
   unsupported_claim, concrete_experience, shallow_experience
 - candidate_intent: one of answered, refusal, clarification_request,
-  pivot_request, repeat_request, off_topic, silence_or_noise, disengaged,
-  frustrated, unknown
+  candidate_question, pivot_request, repeat_request, off_topic,
+  silence_or_noise, disengaged, frustrated, unknown
 - answer_summary
 - observed_signals
 - missing_expected_points: always an array of short strings
@@ -300,6 +259,17 @@ Field-agnostic rules:
   system/project/service only when that is actually relevant.
 - A good answer may describe a case, shift, customer interaction, repair, procedure,
   incident, sale, project, lesson, or decision depending on the role.
+- If this is the closing candidate-question phase and the candidate asks about
+  the role, process, feedback, expectations, next steps, or raises a concern,
+  set candidate_intent to candidate_question.
+- For candidate_question, suggested_interviewer_response must answer or
+  acknowledge the specific question/concern in one or two concise sentences,
+  then close politely. Do not use generic lines like "that gives me what I need".
+- Never include bracketed placeholders or instructions to the interviewer such
+  as "[briefly mention...]" or "e.g.". If exact team details are unknown, say
+  what is available from the role brief and that the hiring team can confirm.
+- If the candidate adds final evidence instead of asking a question, acknowledge
+  the specific added evidence before closing.
 
 Required skill ids and labels:
 {_required_skill_lines(state) if state else required_skills}
@@ -309,6 +279,9 @@ Recent sliding-window context:
 
 Open threads:
 {open_threads or "none"}
+
+Closing candidate-question phase:
+{"yes" if state and state.closing_question_sent else "no"}
 
 Question:
 {question}
@@ -565,6 +538,8 @@ def _mock_intent_from_text(transcript: str) -> CandidateIntent:
         return CandidateIntent.REPEAT_REQUEST
     if any(phrase in transcript for phrase in ["what do you mean", "clarify", "can you explain"]):
         return CandidateIntent.CLARIFICATION_REQUEST
+    if _looks_like_candidate_question(transcript):
+        return CandidateIntent.CANDIDATE_QUESTION
     if any(phrase in transcript for phrase in ["don't know", "do not know", "not sure", "no idea"]):
         return CandidateIntent.REFUSAL
     if any(phrase in transcript for phrase in ["instead", "rather talk", "stronger in", "more experience in"]):
@@ -572,6 +547,44 @@ def _mock_intent_from_text(transcript: str) -> CandidateIntent:
     if any(phrase in transcript for phrase in ["stop", "trouble", "leave me", "end this"]):
         return CandidateIntent.DISENGAGED
     return CandidateIntent.ANSWERED
+
+
+def _looks_like_candidate_question(transcript: str) -> bool:
+    text = transcript.lower().strip()
+    if not text:
+        return False
+    question_markers = [
+        "?",
+        "what are the next steps",
+        "next steps",
+        "want to know",
+        "wanted to know",
+        "know more about the role",
+        "more about the role",
+        "daily basis",
+        "daily work",
+        "daily challenges",
+        "challenges",
+        "what should i expect",
+        "what is expected",
+        "what would be expected",
+        "can you tell me",
+        "could you tell me",
+        "can i ask",
+        "i have a question",
+        "how does the role",
+        "how is the team",
+        "what is the team",
+        "what will happen",
+        "how will this be evaluated",
+        "how did i do",
+        "feedback",
+        "concern",
+        "salary",
+        "shift timing",
+        "work hours",
+    ]
+    return any(marker in text for marker in question_markers)
 
 
 def _mock_interviewer_response(intent: CandidateIntent) -> str:
@@ -582,6 +595,9 @@ def _mock_interviewer_response(intent: CandidateIntent) -> str:
         CandidateIntent.SILENCE_OR_NOISE: "I could not catch that clearly.",
         CandidateIntent.DISENGAGED: "That's okay, we can move to something lighter.",
         CandidateIntent.FRUSTRATED: "No worries, let's reduce the pressure here.",
+        CandidateIntent.CANDIDATE_QUESTION: (
+            "That's a fair question. The team can cover the exact next steps after this round."
+        ),
     }.get(intent, "")
 
 
@@ -668,33 +684,3 @@ def _generic_evidence_markers() -> list[str]:
         "incident",
         "designed",
     ]
-
-
-def _extract_audio_bytes(response: Any) -> bytes | None:
-    candidates = getattr(response, "candidates", None) or []
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-        for part in parts:
-            inline_data = getattr(part, "inline_data", None)
-            data = getattr(inline_data, "data", None)
-            if data:
-                return data
-    return None
-
-
-def _pcm_to_wav(
-    pcm_bytes: bytes,
-    *,
-    sample_rate: int = 24000,
-    channels: int = 1,
-    sample_width: int = 2,
-) -> bytes:
-    """Wrap Gemini TTS PCM bytes in a WAV container for browser playback."""
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav_file:
-        wav_file.setnchannels(channels)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm_bytes)
-    return buffer.getvalue()

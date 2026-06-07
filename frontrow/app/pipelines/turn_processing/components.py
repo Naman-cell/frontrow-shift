@@ -1,5 +1,7 @@
+import logging
 import os
 from datetime import datetime, timezone
+from time import perf_counter
 from uuid import uuid4
 
 os.environ.setdefault("HAYSTACK_TELEMETRY_ENABLED", "false")
@@ -18,6 +20,8 @@ from app.services.audio_understanding_service import (
     fallback_question_from_move,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 
 @component
 class TargetSkillSelector:
@@ -25,6 +29,8 @@ class TargetSkillSelector:
 
     @component.output_types(state=InterviewState, target_skill_id=str, target_skill_label=str)
     def run(self, state: InterviewState) -> dict:
+        started_at = perf_counter()
+        state.runtime_metrics = {}
         target_skill = state.skill_map.highest_priority_uncovered()
         if state.last_next_move is not None:
             target_skill = state.skill_map.get_or_create(
@@ -33,6 +39,7 @@ class TargetSkillSelector:
             )
         if target_skill is None:
             target_skill = state.skill_map.get_or_create("role_fit", "Role fit")
+        _record_metric(state, "target_skill_selector_ms", started_at)
         return {
             "state": state,
             "target_skill_id": target_skill.skill_id,
@@ -67,13 +74,31 @@ class AnswerUnderstandingNode:
         target_skill_id: str,
         target_skill_label: str,
     ) -> dict:
-        analysis = await self.service.analyze_answer(
-            answer,
-            question=state.last_question or state.next_question or "",
-            target_skill_id=target_skill_id,
-            target_skill_label=target_skill_label,
-            state=state,
-        )
+        started_at = perf_counter()
+        try:
+            analysis = await self.service.analyze_answer(
+                answer,
+                question=state.last_question or state.next_question or "",
+                target_skill_id=target_skill_id,
+                target_skill_label=target_skill_label,
+                state=state,
+            )
+        except Exception:
+            LOGGER.exception("Answer understanding provider failed; falling back to local analysis.")
+            analysis = await MockAudioUnderstandingService().analyze_answer(
+                answer,
+                question=state.last_question or state.next_question or "",
+                target_skill_id=target_skill_id,
+                target_skill_label=target_skill_label,
+                state=state,
+            )
+            analysis.confidence = min(analysis.confidence, 0.25)
+            analysis.summary = f"Provider unavailable; fallback analysis used. {analysis.summary}"
+        if analysis.transcript and not answer.transcript:
+            answer.transcript = analysis.transcript
+        if analysis.summary and not answer.analysis_summary:
+            answer.analysis_summary = analysis.summary
+        _record_metric(state, "answer_understanding_ms", started_at)
         return {"state": state, "answer": answer, "analysis": analysis}
 
 
@@ -93,6 +118,7 @@ class EvidenceExtractorNode:
         answer: CandidateAnswer,
         analysis: AnswerAnalysis,
     ) -> dict:
+        started_at = perf_counter()
         signal_type = {
             AnswerQuality.STRONG: EvidenceSignalType.STRONG_EVIDENCE,
             AnswerQuality.CONCRETE_EXPERIENCE: EvidenceSignalType.CONCRETE_EXPERIENCE,
@@ -125,6 +151,7 @@ class EvidenceExtractorNode:
             quote_or_audio_ref=answer.audio_ref or answer.transcript[:180],
         )
         state.evidence_ledger.append(record)
+        _record_metric(state, "evidence_extractor_ms", started_at)
         return {
             "state": state,
             "answer": answer,
@@ -150,6 +177,7 @@ class SkillStateUpdaterNode:
         analysis: AnswerAnalysis,
         evidence: list[EvidenceRecord],
     ) -> dict:
+        started_at = perf_counter()
         skill = state.skill_map.get_or_create(
             analysis.target_skill_id,
             analysis.target_skill_label,
@@ -178,6 +206,7 @@ class SkillStateUpdaterNode:
             skill.confidence = min(skill.confidence + 0.15, 1.0)
             skill.status = SkillStatus.IN_PROGRESS
 
+        _record_metric(state, "skill_state_updater_ms", started_at)
         return {
             "state": state,
             "answer": answer,
@@ -207,7 +236,9 @@ class NextMovePlannerNode:
         analysis: AnswerAnalysis,
         evidence: list[EvidenceRecord],
     ) -> dict:
+        started_at = perf_counter()
         next_move = self.planner.plan(state=state, analysis=analysis)
+        _record_metric(state, "next_move_planner_ms", started_at)
         return {
             "state": state,
             "answer": answer,
@@ -240,6 +271,7 @@ class QuestionGeneratorNode:
         evidence: list[EvidenceRecord],
         next_move: NextMoveDecision,
     ) -> dict:
+        started_at = perf_counter()
         question = (
             next_move.interviewer_response
             if next_move.should_end_interview
@@ -250,6 +282,7 @@ class QuestionGeneratorNode:
             )
         )
 
+        _record_metric(state, "question_generator_ms", started_at)
         return {
             "state": state,
             "answer": answer,
@@ -275,6 +308,7 @@ class QuestionGeneratorNode:
         evidence: list[EvidenceRecord],
         next_move: NextMoveDecision,
     ) -> dict:
+        started_at = perf_counter()
         question = (
             next_move.interviewer_response
             if next_move.should_end_interview
@@ -286,6 +320,7 @@ class QuestionGeneratorNode:
             )
         )
 
+        _record_metric(state, "question_generator_ms", started_at)
         return {
             "state": state,
             "answer": answer,
@@ -316,6 +351,7 @@ class TurnAggregatorNode:
         next_move: NextMoveDecision,
         next_question: str,
     ) -> dict:
+        started_at = perf_counter()
         turn_index = len(state.turns) + 1
         turn = InterviewTurn(
             turn_id=f"turn_{turn_index:03d}",
@@ -339,6 +375,7 @@ class TurnAggregatorNode:
         state.conversation_summary = _conversation_summary(state)
         state.open_threads = _open_threads(state)
         state.updated_at = datetime.now(timezone.utc)
+        _record_metric(state, "turn_aggregator_ms", started_at)
         return {
             "state": state,
             "turn": turn,
@@ -380,3 +417,7 @@ def _open_threads(state: InterviewState) -> list[str]:
             missing = ", ".join(analysis.missing_expected_points[:3])
             threads.append(f"Unresolved points for {analysis.target_skill_label}: {missing}")
     return list(dict.fromkeys(threads))[-8:]
+
+
+def _record_metric(state: InterviewState, key: str, started_at: float) -> None:
+    state.runtime_metrics[key] = int((perf_counter() - started_at) * 1000)

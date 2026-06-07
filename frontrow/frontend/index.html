@@ -30,6 +30,11 @@
             <input id="wsBase" value="ws://localhost:8000/api/v1" />
           </label>
 
+          <label class="inline-toggle">
+            <input id="voiceEnabled" type="checkbox" checked />
+            Use Azure voice
+          </label>
+
           <label>
             Candidate ID
             <input id="candidateId" value="candidate_001" />
@@ -105,6 +110,14 @@ AI model integration</textarea>
               <p id="metaLine">No session yet.</p>
             </div>
             <button id="clearBtn" class="secondary">Clear Chat</button>
+          </div>
+
+          <div class="latency-panel">
+            <div class="latency-head">
+              <strong>Latency Trace</strong>
+              <span id="latencySummary">No turns measured yet.</span>
+            </div>
+            <div id="latencyOutput" class="latency-output"></div>
           </div>
 
           <div id="messages" class="messages"></div>

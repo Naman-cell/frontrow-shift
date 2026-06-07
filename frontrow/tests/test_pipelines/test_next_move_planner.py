@@ -280,3 +280,49 @@ def test_explicit_stop_request_ends_interview_policy() -> None:
     assert decision.move_type == MoveType.WRAP_UP
     assert decision.should_end_interview is True
     assert "stop" in decision.interviewer_response.lower()
+
+
+def test_closing_candidate_question_gets_specific_response_not_template() -> None:
+    planner = NextMovePlanner()
+    state = make_state(time_remaining_seconds=30, duration_minutes=5)
+    state.closing_question_sent = True
+    analysis = make_analysis(
+        AnswerQuality.PARTIAL,
+        intent=CandidateIntent.CANDIDATE_QUESTION,
+    )
+    analysis.summary = "Candidate asked what the next steps are after the interview."
+    analysis.suggested_interviewer_response = (
+        "Good question. The team should review this conversation and share next steps "
+        "after the interview round. Thanks for taking the time today."
+    )
+
+    decision = planner.plan(state=state, analysis=analysis)
+
+    assert decision.move_type == MoveType.WRAP_UP
+    assert decision.should_end_interview is True
+    assert "next steps" in decision.interviewer_response.lower()
+    assert "gives me what i need" not in decision.interviewer_response.lower()
+
+
+def test_closing_candidate_question_replaces_provider_placeholder_with_role_brief() -> None:
+    planner = NextMovePlanner()
+    state = make_state(time_remaining_seconds=30, duration_minutes=5)
+    state.closing_question_sent = True
+    state.role.job_description_summary = "Build APIs, maintain services, and collaborate with product teams."
+    analysis = make_analysis(
+        AnswerQuality.PARTIAL,
+        intent=CandidateIntent.CANDIDATE_QUESTION,
+    )
+    analysis.summary = "Candidate asked about role responsibilities."
+    analysis.suggested_interviewer_response = (
+        "Certainly! In this role, you would primarily be responsible for "
+        "[briefly mention 2-3 key responsibilities, e.g., maintaining systems]."
+    )
+
+    decision = planner.plan(state=state, analysis=analysis)
+
+    assert decision.move_type == MoveType.WRAP_UP
+    assert "Build APIs" in decision.interviewer_response
+    assert "[" not in decision.interviewer_response
+    assert "briefly mention" not in decision.interviewer_response
+    assert "thank you" in decision.interviewer_response.lower()

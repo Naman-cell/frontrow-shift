@@ -36,6 +36,7 @@ class InterviewState(BaseModel):
     covered_topics: list[str] = Field(default_factory=list)
     open_threads: list[str] = Field(default_factory=list)
     closing_question_sent: bool = False
+    runtime_metrics: dict[str, int] = Field(default_factory=dict)
     last_question: str | None = None
     next_question: str | None = None
     last_next_move: NextMoveDecision | None = None

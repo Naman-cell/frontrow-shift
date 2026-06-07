@@ -1,4 +1,7 @@
+import logging
+from asyncio import create_task
 from datetime import datetime, timezone
+from time import perf_counter
 from uuid import uuid4
 
 from app.models.interview import InterviewQuestionMode, InterviewSession, InterviewSessionCreate, InterviewStatus
@@ -14,6 +17,8 @@ from app.pipelines.report_generation.pipeline import (
 )
 from app.pipelines.turn_processing.pipeline import TurnProcessingInput, TurnProcessingPipeline
 from app.services.audio_understanding_service import AudioUnderstandingService
+
+LOGGER = logging.getLogger(__name__)
 
 
 class InMemoryActiveSessionStore:
@@ -115,6 +120,7 @@ class InterviewSessionManager:
         interview_id: str,
         payload: WebSocketInboundPayload,
     ) -> WebSocketOutboundPayload:
+        request_started_at = perf_counter()
         if payload.user_leave or payload.overtime or payload.is_complete:
             report = await self.complete_interview(interview_id, incomplete=payload.user_leave)
             return WebSocketOutboundPayload(
@@ -126,6 +132,7 @@ class InterviewSessionManager:
 
         state = await self.active_store.get_state(interview_id)
         self._refresh_time_remaining(state)
+        started_at = perf_counter()
         output = await self.turn_processing_pipeline.run(
             TurnProcessingInput(
                 state=state,
@@ -137,46 +144,82 @@ class InterviewSessionManager:
                 ),
             )
         )
+        pipeline_ms = int((perf_counter() - started_at) * 1000)
+        self._strip_audio_payloads(output.state)
         if output.next_move.should_end_interview:
-            await self.active_store.save_state(output.state)
-            report = await self.complete_interview(interview_id)
+            finish_started_at = perf_counter()
+            await self._mark_interview_finished(interview_id, state=output.state)
+            finish_ms = int((perf_counter() - finish_started_at) * 1000)
+            self._schedule_report_generation(interview_id)
+            backend_total_ms = int((perf_counter() - request_started_at) * 1000)
             return WebSocketOutboundPayload(
                 query_asked=output.next_move.interviewer_response
                 or "Understood, we can stop here. Thank you for your time.",
                 completed=True,
                 interview_duration=output.state.time_remaining_seconds,
                 meta={
-                    "report_id": report.interview_id,
+                    "report_id": interview_id,
                     "pipeline": "haystack.turn_processing",
                     "turn_index": len(output.state.turns),
                     "candidate_intent": output.turn.answer_analysis.intent,
                     "answer_quality": output.turn.answer_analysis.quality,
+                    "candidate_transcript": output.turn.candidate_answer.transcript,
+                    "candidate_answer_summary": output.turn.answer_analysis.summary,
                     "move_type": output.next_move.move_type,
                     "target_skill": output.next_move.target_skill_id,
                     "reason": output.next_move.reason,
                     "interviewer_response": output.next_move.interviewer_response,
                     "ended_by_policy": True,
+                    "latency_ms": self._latency_meta(
+                        output.state,
+                        turn_pipeline=pipeline_ms,
+                        backend_total=backend_total_ms,
+                        state_save=finish_ms,
+                        report_generation="deferred",
+                    ),
                 },
             )
         completed = await self._apply_question_mode(output.state)
         if completed:
-            report = await self.complete_interview(interview_id)
+            finish_started_at = perf_counter()
+            await self._mark_interview_finished(interview_id, state=output.state)
+            finish_ms = int((perf_counter() - finish_started_at) * 1000)
+            self._schedule_report_generation(interview_id)
+            backend_total_ms = int((perf_counter() - request_started_at) * 1000)
             return WebSocketOutboundPayload(
                 query_asked="",
                 completed=True,
                 interview_duration=output.state.time_remaining_seconds,
-                meta={"report_id": report.interview_id, "reason": "manual_plan_exhausted"},
+                meta={
+                    "report_id": interview_id,
+                    "reason": "manual_plan_exhausted",
+                    "latency_ms": self._latency_meta(
+                        output.state,
+                        turn_pipeline=pipeline_ms,
+                        backend_total=backend_total_ms,
+                        state_save=finish_ms,
+                        report_generation="deferred",
+                    ),
+                },
             )
+        save_started_at = perf_counter()
         await self.active_store.save_state(output.state)
-        return self._outbound_for_state(output.state, completed=False)
+        save_ms = int((perf_counter() - save_started_at) * 1000)
+        backend_total_ms = int((perf_counter() - request_started_at) * 1000)
+        outbound = self._outbound_for_state(output.state, completed=False)
+        outbound.meta["latency_ms"] = self._latency_meta(
+            output.state,
+            turn_pipeline=pipeline_ms,
+            backend_total=backend_total_ms,
+            state_save=save_ms,
+        )
+        return outbound
 
     async def complete_interview(self, interview_id: str, *, incomplete: bool = False) -> InterviewReport:
+        await self._mark_interview_finished(interview_id, incomplete=incomplete)
         session = await self.durable_repository.get_session(interview_id)
         state = await self.active_store.get_state(interview_id)
-        session.status = InterviewStatus.INCOMPLETE if incomplete else InterviewStatus.COMPLETED
-        session.completed_at = datetime.now(timezone.utc)
-        state.status = session.status
-        state.updated_at = session.completed_at
+        self._strip_audio_payloads(state)
         report_output = await self.launch_report_chain(state)
         await self.durable_repository.save_session(session)
         await self.durable_repository.save_report(report_output.report)
@@ -188,6 +231,47 @@ class InterviewSessionManager:
 
     async def launch_report_chain(self, state: InterviewState) -> ReportGenerationOutput:
         return await self.report_generation_pipeline.run(ReportGenerationInput(state=state))
+
+    async def _mark_interview_finished(
+        self,
+        interview_id: str,
+        *,
+        incomplete: bool = False,
+        state: InterviewState | None = None,
+    ) -> None:
+        session = await self.durable_repository.get_session(interview_id)
+        state = state or await self.active_store.get_state(interview_id)
+        completed_at = datetime.now(timezone.utc)
+        session.status = InterviewStatus.INCOMPLETE if incomplete else InterviewStatus.COMPLETED
+        session.completed_at = session.completed_at or completed_at
+        state.status = session.status
+        state.updated_at = completed_at
+        self._strip_audio_payloads(state)
+        await self.durable_repository.save_session(session)
+        await self.active_store.save_state(state)
+
+    def _schedule_report_generation(self, interview_id: str) -> None:
+        async def generate() -> None:
+            try:
+                state = await self.active_store.get_state(interview_id)
+                self._strip_audio_payloads(state)
+                report_output = await self.launch_report_chain(state)
+                await self.durable_repository.save_report(report_output.report)
+            except Exception:
+                LOGGER.exception("Deferred report generation failed for interview %s", interview_id)
+
+        create_task(generate())
+
+    def _strip_audio_payloads(self, state: InterviewState) -> None:
+        for turn in state.turns:
+            answer = turn.candidate_answer
+            if answer is None or not answer.audio_base64:
+                continue
+            approx_bytes = int(len(answer.audio_base64) * 0.75)
+            answer.audio_ref = answer.audio_ref or (
+                f"inline_audio:{approx_bytes}_bytes:{answer.audio_mime_type or 'audio'}"
+            )
+            answer.audio_base64 = None
 
     async def _apply_question_mode(self, state: InterviewState) -> bool:
         if state.question_mode not in {InterviewQuestionMode.HYBRID, InterviewQuestionMode.MANUAL}:
@@ -213,32 +297,6 @@ class InterviewSessionManager:
             meta=self._meta_for_state(state, next_move),
         )
 
-    async def audio_payload_for_question(
-        self,
-        question: str,
-        *,
-        state: InterviewState | None = None,
-    ) -> WebSocketOutboundPayload:
-        audio_base64 = None
-        tts_error = None
-        try:
-            audio_base64 = await self.turn_processing_pipeline.audio_understanding_service.synthesize_question_audio(question)
-        except Exception as exc:
-            tts_error = f"{type(exc).__name__}: {exc}"
-        duration = state.time_remaining_seconds if state else 0
-        return WebSocketOutboundPayload(
-            message_type="audio",
-            query_asked=question,
-            completed=False,
-            interview_duration=duration,
-            audio_base64=audio_base64,
-            audio_mime_type="audio/wav" if audio_base64 else None,
-            meta={
-                "tts": "google" if audio_base64 else None,
-                "tts_error": tts_error,
-            },
-        )
-
     async def get_state(self, interview_id: str) -> InterviewState:
         return await self.active_store.get_state(interview_id)
 
@@ -258,12 +316,41 @@ class InterviewSessionManager:
             "turn_index": len(state.turns),
             "candidate_intent": state.turns[-1].answer_analysis.intent if state.turns else None,
             "answer_quality": state.turns[-1].answer_analysis.quality if state.turns else None,
+            "candidate_transcript": (
+                state.turns[-1].candidate_answer.transcript
+                if state.turns and state.turns[-1].candidate_answer
+                else None
+            ),
+            "candidate_answer_summary": (
+                state.turns[-1].answer_analysis.summary
+                if state.turns and state.turns[-1].answer_analysis
+                else None
+            ),
             "move_type": next_move.move_type if next_move else None,
             "target_skill": next_move.target_skill_id if next_move else None,
             "reason": next_move.reason if next_move else None,
             "interviewer_response": next_move.interviewer_response if next_move else None,
             "time_remaining_seconds": state.time_remaining_seconds,
         }
+
+    def _latency_meta(
+        self,
+        state: InterviewState,
+        *,
+        turn_pipeline: int,
+        backend_total: int,
+        state_save: int,
+        report_generation: str | None = None,
+    ) -> dict:
+        meta = {
+            "backend_total": backend_total,
+            "turn_pipeline": turn_pipeline,
+            "state_save": state_save,
+            **state.runtime_metrics,
+        }
+        if report_generation is not None:
+            meta["report_generation"] = report_generation
+        return meta
 
     def _refresh_time_remaining(self, state: InterviewState) -> None:
         if state.started_at is None:
