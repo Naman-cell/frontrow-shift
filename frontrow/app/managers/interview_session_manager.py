@@ -24,6 +24,7 @@ from app.pipelines.report_generation.pipeline import (
 )
 from app.pipelines.turn_processing.pipeline import TurnProcessingInput, TurnProcessingPipeline
 from app.services.audio_understanding_service import AudioUnderstandingService
+from app.services.whisper_transcription_service import TranscriptionService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,8 +74,10 @@ class InterviewSessionManager:
         durable_repository: InMemoryDurableInterviewRepository | None = None,
         initialization_pipeline: InterviewInitializationPipeline | None = None,
         turn_processing_pipeline: TurnProcessingPipeline | None = None,
+        fast_turn_processing_pipeline: TurnProcessingPipeline | None = None,
         report_generation_pipeline: ReportGenerationPipeline | None = None,
         audio_understanding_service: AudioUnderstandingService | None = None,
+        transcription_service: TranscriptionService | None = None,
     ) -> None:
         self.active_store = active_store or InMemoryActiveSessionStore()
         self.durable_repository = durable_repository or InMemoryDurableInterviewRepository()
@@ -82,7 +85,9 @@ class InterviewSessionManager:
         self.turn_processing_pipeline = turn_processing_pipeline or TurnProcessingPipeline(
             audio_understanding_service=audio_understanding_service,
         )
+        self.fast_turn_processing_pipeline = fast_turn_processing_pipeline
         self.report_generation_pipeline = report_generation_pipeline or ReportGenerationPipeline()
+        self.transcription_service = transcription_service
         self.redis_client = None
 
     async def create_interview(self, payload: InterviewSessionCreate) -> InterviewSession:
@@ -141,8 +146,41 @@ class InterviewSessionManager:
 
         state = await self.active_store.get_state(interview_id)
         self._refresh_time_remaining(state)
+
+        # Dual-path: fast Whisper transcription + deferred rich Gemini audio analysis
+        audio_for_background: str | None = None
+        audio_mime_for_background: str | None = None
+        if self.transcription_service and payload.audio_base64:
+            whisper_start = perf_counter()
+            transcript = await self.transcription_service.transcribe(
+                payload.audio_base64,
+                payload.audio_mime_type or "audio/webm",
+            )
+            whisper_ms = int((perf_counter() - whisper_start) * 1000)
+            state.runtime_metrics["whisper_transcribe_ms"] = whisper_ms
+
+            # Stash audio for the background rich-analysis task
+            audio_for_background = payload.audio_base64
+            audio_mime_for_background = payload.audio_mime_type
+
+            # Fast path: replace payload so pipeline sees transcript-only (no audio)
+            payload.text = transcript
+            payload.audio_base64 = None
+
+        if self.transcription_service and audio_for_background:
+            LOGGER.info("turn_path=fast_whisper+mock interview=%s", interview_id)
+        elif payload.audio_base64:
+            LOGGER.info("turn_path=gemini_full interview=%s", interview_id)
+        else:
+            LOGGER.info("turn_path=text_only interview=%s", interview_id)
+
+        # Choose pipeline: fast (Mock analysis + Gemini questions) vs normal (full Gemini)
+        active_pipeline = self.turn_processing_pipeline
+        if audio_for_background and self.fast_turn_processing_pipeline:
+            active_pipeline = self.fast_turn_processing_pipeline
+
         started_at = perf_counter()
-        output = await self.turn_processing_pipeline.run(
+        output = await active_pipeline.run(
             TurnProcessingInput(
                 state=state,
                 answer=CandidateAnswer(
@@ -159,6 +197,16 @@ class InterviewSessionManager:
             finish_started_at = perf_counter()
             await self._mark_interview_finished(interview_id, state=output.state)
             finish_ms = int((perf_counter() - finish_started_at) * 1000)
+            if audio_for_background and output.state.turns:
+                self._schedule_background_analysis(
+                    interview_id=interview_id,
+                    turn_index=len(output.state.turns) - 1,
+                    audio_base64=audio_for_background,
+                    audio_mime_type=audio_mime_for_background or "audio/webm",
+                    question=output.state.turns[-1].question,
+                    target_skill_id=output.turn.answer_analysis.target_skill_id,
+                    target_skill_label=output.turn.answer_analysis.target_skill_label,
+                )
             self._schedule_report_generation(interview_id)
             backend_total_ms = int((perf_counter() - request_started_at) * 1000)
             end_latency = self._latency_meta(
@@ -200,6 +248,16 @@ class InterviewSessionManager:
             finish_started_at = perf_counter()
             await self._mark_interview_finished(interview_id, state=output.state)
             finish_ms = int((perf_counter() - finish_started_at) * 1000)
+            if audio_for_background and output.state.turns:
+                self._schedule_background_analysis(
+                    interview_id=interview_id,
+                    turn_index=len(output.state.turns) - 1,
+                    audio_base64=audio_for_background,
+                    audio_mime_type=audio_mime_for_background or "audio/webm",
+                    question=output.state.turns[-1].question,
+                    target_skill_id=output.turn.answer_analysis.target_skill_id,
+                    target_skill_label=output.turn.answer_analysis.target_skill_label,
+                )
             self._schedule_report_generation(interview_id)
             backend_total_ms = int((perf_counter() - request_started_at) * 1000)
             plan_latency = self._latency_meta(
@@ -228,6 +286,18 @@ class InterviewSessionManager:
         save_started_at = perf_counter()
         await self.active_store.save_state(output.state)
         save_ms = int((perf_counter() - save_started_at) * 1000)
+
+        if audio_for_background and output.state.turns:
+            self._schedule_background_analysis(
+                interview_id=interview_id,
+                turn_index=len(output.state.turns) - 1,
+                audio_base64=audio_for_background,
+                audio_mime_type=audio_mime_for_background or "audio/webm",
+                question=output.state.turns[-1].question,
+                target_skill_id=output.turn.answer_analysis.target_skill_id,
+                target_skill_label=output.turn.answer_analysis.target_skill_label,
+            )
+
         backend_total_ms = int((perf_counter() - request_started_at) * 1000)
         outbound = self._outbound_for_state(output.state, completed=False)
         latency = self._latency_meta(
@@ -316,6 +386,62 @@ class InterviewSessionManager:
         self._strip_audio_payloads(state)
         await self.durable_repository.save_session(session)
         await self.active_store.save_state(state)
+
+    def _schedule_background_analysis(
+        self,
+        *,
+        interview_id: str,
+        turn_index: int,
+        audio_base64: str,
+        audio_mime_type: str,
+        question: str,
+        target_skill_id: str,
+        target_skill_label: str,
+    ) -> None:
+        """Fire-and-forget: send audio to Gemini for deep analysis, update state."""
+
+        async def _run() -> None:
+            try:
+                state = await self.active_store.get_state(interview_id)
+                if turn_index >= len(state.turns):
+                    return
+                turn = state.turns[turn_index]
+
+                bg_start = perf_counter()
+                rich_analysis = await self.turn_processing_pipeline.audio_understanding_service.analyze_answer(
+                    CandidateAnswer(
+                        transcript=turn.candidate_answer.transcript,
+                        audio_base64=audio_base64,
+                        audio_mime_type=audio_mime_type,
+                    ),
+                    question=question,
+                    target_skill_id=target_skill_id,
+                    target_skill_label=target_skill_label,
+                    state=state,
+                )
+                bg_ms = int((perf_counter() - bg_start) * 1000)
+
+                # Merge: keep Whisper transcript, enrich everything else from Gemini
+                existing_transcript = turn.answer_analysis.transcript
+                turn.answer_analysis = rich_analysis
+                if existing_transcript and not rich_analysis.transcript:
+                    turn.answer_analysis.transcript = existing_transcript
+
+                state.runtime_metrics["background_gemini_ms"] = bg_ms
+                await self.active_store.save_state(state)
+                LOGGER.info(
+                    "background_analysis_complete interview=%s turn=%d",
+                    interview_id,
+                    turn_index,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Background Gemini analysis failed for interview=%s turn=%d",
+                    interview_id,
+                    turn_index,
+                )
+
+        create_task(_run())
 
     def _schedule_report_generation(self, interview_id: str) -> None:
         async def generate() -> None:
@@ -448,6 +574,8 @@ class InterviewSessionManager:
                     "turn_aggregator_ms": latency.get("turn_aggregator_ms", 0),
                     "state_save_ms": latency.get("state_save", 0),
                     "audio_assembly_ms": latency.get("audio_assembly", 0),
+                    "whisper_transcribe_ms": latency.get("whisper_transcribe_ms", 0),
+                    "background_gemini_ms": latency.get("background_gemini_ms", 0),
                 },
                 separators=(",", ":"),
             ),

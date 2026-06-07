@@ -172,6 +172,12 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
         parsed = _parse_json_response(getattr(response, "text", "") or "")
         quality = _coerce_quality(parsed.get("answer_quality"))
         intent = _coerce_intent(parsed.get("candidate_intent"))
+        preferred_skill = _coerce_optional_text(parsed.get("preferred_relevant_skill_id"))
+        effective_skill_id = target_skill_id
+        effective_skill_label = target_skill_label
+        if preferred_skill and state and state.skill_map.skills.get(preferred_skill):
+            effective_skill_id = preferred_skill
+            effective_skill_label = state.skill_map.skills[preferred_skill].label
         return AnswerAnalysis(
             quality=quality,
             intent=intent,
@@ -183,8 +189,8 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
             summary=parsed.get("answer_summary")
             or parsed.get("summary")
             or "Candidate answer analyzed by Gemini.",
-            target_skill_id=target_skill_id,
-            target_skill_label=target_skill_label,
+            target_skill_id=effective_skill_id,
+            target_skill_label=effective_skill_label,
             confidence=_coerce_float(parsed.get("confidence"), answer.confidence or 0.5),
             resume_claim_detected=bool(parsed.get("resume_claim_detected", False)),
             extracted_claim=_coerce_optional_text(parsed.get("extracted_claim")),
@@ -408,6 +414,21 @@ Role: {role.title} ({role.seniority})
 JD summary: {role.job_description_summary}
 Resume summary: {role.resume_summary}
 Required skills: {", ".join(role.required_skills)}
+
+QUESTION DIFFICULTY CALIBRATION:
+- Fresher/Entry/Intern: Ask basic conceptual questions. "What is X?", "Can you explain Y?", "What would you consider when...?". Do NOT ask about production-scale systems, advanced patterns, or "how do you handle X at scale" for a fresher.
+- Junior (1-2 years): Ask about basic implementations and common patterns. "How have you used X?", "Walk me through a simple Y you built."
+- Mid (3-5 years): Ask about design decisions, tradeoffs, and real implementations.
+- Senior/Lead/Staff: Ask about architecture, scale, mentoring, and system-wide decisions.
+
+CRITICAL: Match question complexity to the seniority level above. A fresher should NEVER be asked about managing production systems at scale.
+
+CLOSING/WRAP-UP STYLE:
+- Never use the exact phrase "That's a fair question. The team can cover the exact next steps after this round."
+- Vary your closing naturally. Examples: "Good question — your recruiter will follow up with details.", "Thanks for your time today. We'll be in touch.", "Great chatting with you. Next steps will come from the hiring team."
+- Be warm and natural, not corporate-template.
+- If the candidate asks "how did I do?", give a brief, encouraging-but-honest response like "Thanks for being candid today. The team will review and get back to you." Do NOT give specific feedback on performance.
+
 Covered topics: {covered}
 Untouched priority topics: {", ".join(untouched) or "none"}
 Recent questions: {recent_questions}
@@ -444,6 +465,13 @@ Write one natural opening question that:
 - asks one question only
 - stays under 34 words
 - does not disclose scoring
+
+QUESTION DIFFICULTY CALIBRATION:
+- Fresher/Entry/Intern: Ask basic conceptual questions. "What is X?", "Can you explain Y in simple terms?". Do NOT ask about production systems, scale, or advanced patterns.
+- Junior (1-2 years): Ask about basic usage and common patterns.
+- Mid (3-5 years): Ask about design decisions and real implementations.
+- Senior/Lead/Staff: Ask about architecture, scale, and system-wide decisions.
+CRITICAL: Match question complexity to the seniority level. A fresher should NEVER be asked about managing production systems at scale.
 
 Role: {state.role.title} ({state.role.seniority})
 JD summary: {state.role.job_description_summary}
@@ -648,7 +676,7 @@ def _mock_interviewer_response(intent: CandidateIntent) -> str:
         CandidateIntent.DISENGAGED: "That's okay, we can move to something lighter.",
         CandidateIntent.FRUSTRATED: "No worries, let's reduce the pressure here.",
         CandidateIntent.CANDIDATE_QUESTION: (
-            "That's a fair question. The team can cover the exact next steps after this round."
+            "Good question — your recruiter will follow up with details."
         ),
     }.get(intent, "")
 

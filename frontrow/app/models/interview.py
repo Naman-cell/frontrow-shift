@@ -31,17 +31,63 @@ class RoleContext(BaseModel):
     @classmethod
     def split_long_skills(cls, skills: list[str]) -> list[str]:
         """Split oversized skill strings and cap the list."""
+        # JD section headers to strip — these are not skills themselves
+        _JD_CRUFT = re.compile(
+            r"^(technical requirements?|preferred qualifications?|required skills?|"
+            r"basic qualifications?|key responsibilities?|nice to have|"
+            r"minimum qualifications?|responsibilities)\s*:?\s*",
+            re.IGNORECASE,
+        )
+
+        def _extract_label(segment: str) -> str:
+            """If segment looks like 'Label: long description', return Label only."""
+            segment = segment.strip().rstrip(".")
+            # Colon-split: take the part before the first colon if it's short
+            if ":" in segment:
+                label, _, rest = segment.partition(":")
+                label = label.strip()
+                # Only use label when it's a plausible skill name (2-60 chars, not a URL)
+                if (
+                    2 <= len(label) <= 60
+                    and "http" not in label
+                    and (" " not in label or len(label.split()) <= 6)
+                ):
+                    return label
+            return segment
+
+        def _split_one(raw: str) -> list[str]:
+            raw = raw.strip()
+            if not raw:
+                return []
+            # Remove leading JD section cruft
+            raw = _JD_CRUFT.sub("", raw).strip()
+            if not raw:
+                return []
+            # Short enough — keep as-is (no length filter; short names like "AWS" are valid)
+            if len(raw) <= 80:
+                label = _extract_label(raw)
+                return [label] if label else [raw]
+            # Split on: semicolons, newlines, period-then-capital (with or without space)
+            parts = re.split(r"[;\n]|(?<=\.)\s*(?=[A-Z])", raw)
+            expanded: list[str] = []
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                part = _JD_CRUFT.sub("", part).strip()
+                label = _extract_label(part)
+                if len(label) > 80:
+                    # Still too long — split on comma boundaries
+                    sub = [s.strip().rstrip(".") for s in label.split(",") if len(s.strip()) >= 8]
+                    expanded.extend(sub[:4])
+                elif len(label) >= 8:
+                    expanded.append(label)
+            return expanded or [raw[:80]]
+
         result: list[str] = []
         for skill in skills:
-            skill = skill.strip()
-            if not skill:
-                continue
-            if len(skill) <= 80:
-                result.append(skill)
-            else:
-                parts = re.split(r"[;\n]|(?<=[.])\s+(?=[A-Z])", skill)
-                parts = [p.strip().rstrip(".") for p in parts if len(p.strip()) >= 8]
-                result.extend(parts if parts else [skill[:80]])
+            result.extend(_split_one(skill))
+
         seen: set[str] = set()
         deduped: list[str] = []
         for s in result:

@@ -8,25 +8,26 @@ os.environ.setdefault("HAYSTACK_TELEMETRY_ENABLED", "false")
 
 from haystack import component
 
-from app.models.evidence import EvidenceRecord, EvidenceSignalType
-from app.models.report import (
+from report_engine.models import (
     AdvisorySignal,
     CompetencyScorecardItem,
     EvidenceByQuestion,
+    EvidenceRecord,
+    EvidenceSignalType,
     InterviewReport,
+    InterviewState,
     ReportFinding,
     ScoreCompositionItem,
     SkillBreakdown,
     SkillRoleMatchItem,
     SkillScoreDetail,
 )
-from app.models.state import InterviewState
-from app.pipelines.report_generation.heuristics import (
+from report_engine.heuristics import (
     quality_score_4,
     report_rationale,
     soft_layer as heuristic_soft_layer,
 )
-from app.services.report_scoring_service import (
+from report_engine.scoring_service import (
     DimensionScoringResult,
     EvidenceAnalysisResult,
     HeuristicReportScoringService,
@@ -37,7 +38,7 @@ from app.services.report_scoring_service import (
 LOGGER = logging.getLogger(__name__)
 
 
-# ── Deterministic helpers (kept from original pipeline.py) ───────────
+# ── Deterministic helpers ────────────────────────────────────────────
 
 
 def skill_score_4(raw_score: float, confidence: float, attempts: int) -> float:
@@ -105,7 +106,7 @@ def signal_level(signal_count: int, total: int) -> str:
     return "not_enough_signal"
 
 
-# ── Haystack component nodes ────────────────────────────────────────
+# ── Haystack component nodes ─────────────────────────────────────────
 
 
 @component
@@ -473,8 +474,10 @@ def _build_ai_native_signals(state: InterviewState) -> list[AdvisorySignal]:
     strong = [r for r in state.evidence_ledger.records if r.signal_type == EvidenceSignalType.STRONG_EVIDENCE]
     concrete = [r for r in state.evidence_ledger.records if r.signal_type == EvidenceSignalType.CONCRETE_EXPERIENCE]
     partial = [r for r in state.evidence_ledger.records if r.signal_type == EvidenceSignalType.PARTIAL_UNDERSTANDING]
+
     def first(records: list, fb: str) -> str:
         return records[0].summary if records else fb
+
     return [
         AdvisorySignal(
             label="Reasoning quality",

@@ -24,6 +24,7 @@ class SkillScoreDetail(BaseModel):
     skill_id: str
     label: str
     score_4: float
+    score_label: str = ""
     target_4: float
     band: str
     weight_in_dimension: float
@@ -84,6 +85,7 @@ class EvidenceByQuestion(BaseModel):
     question: str
     answer_excerpt: str
     score_4: float
+    score_label: str = ""
     band: str
     ai_judgement: str
     evidence_ids: list[str] = Field(default_factory=list)
@@ -93,7 +95,7 @@ class InterviewReport(BaseModel):
     interview_id: str
     overall_score: float = 0.0
     fit_score: int = 0
-    role_bar: int = 70
+    role_bar: int = 100
     verdict: str = "needs_review"
     rationale: str = ""
     tags: list[str] = Field(default_factory=list)

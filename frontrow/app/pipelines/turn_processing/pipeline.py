@@ -52,10 +52,14 @@ class TurnProcessingPipeline:
     def __init__(
         self,
         audio_understanding_service: AudioUnderstandingService | None = None,
+        question_generation_service: AudioUnderstandingService | None = None,
         next_move_planner: NextMovePlanner | None = None,
     ) -> None:
         self.audio_understanding_service = (
             audio_understanding_service or MockAudioUnderstandingService()
+        )
+        self.question_generation_service = (
+            question_generation_service or self.audio_understanding_service
         )
         self.next_move_planner = next_move_planner or NextMovePlanner()
         self.pipeline = self._build_pipeline()
@@ -75,7 +79,7 @@ class TurnProcessingPipeline:
         )
         pipeline.add_component(
             "question_generator",
-            QuestionGeneratorNode(service=self.audio_understanding_service),
+            QuestionGeneratorNode(service=self.question_generation_service),
         )
         pipeline.add_component("turn_aggregator", TurnAggregatorNode())
 

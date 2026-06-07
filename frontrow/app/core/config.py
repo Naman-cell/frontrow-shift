@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     persistence_backend: str = Field(default="memory", validation_alias="PERSISTENCE_BACKEND")
     active_state_backend: str = Field(default="memory", validation_alias="ACTIVE_STATE_BACKEND")
 
+    # Azure AI Foundry Whisper transcription
+    azure_whisper_key: str = Field(default="", validation_alias="AZURE_WHISPER_KEY")
+    azure_whisper_endpoint: str = Field(default="", validation_alias="AZURE_WHISPER_ENDPOINT")
+    azure_whisper_api_version: str = Field(default="2024-06-01", validation_alias="AZURE_WHISPER_API_VERSION")
+    whisper_model: str = Field(default="whisper", validation_alias="WHISPER_MODEL")
+    enable_fast_transcription: bool = Field(default=False, validation_alias="ENABLE_FAST_TRANSCRIPTION")
+
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
     gemini_audio_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_AUDIO_MODEL")
     enable_gemini: bool = Field(default=False, validation_alias="ENABLE_GEMINI")

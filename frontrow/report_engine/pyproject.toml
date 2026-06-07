@@ -1,0 +1,16 @@
+[project]
+name = "frontrow-report-engine"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+    "haystack-ai>=2.21.0",
+    "google-genai>=2.8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.0", "pytest-asyncio>=1.4.0", "ruff>=0.15.16"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

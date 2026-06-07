@@ -1,6 +1,7 @@
 import os
 
 os.environ["ENABLE_GEMINI"] = "false"
+os.environ["ENABLE_FAST_TRANSCRIPTION"] = "false"
 
 from fastapi.testclient import TestClient
 
