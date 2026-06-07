@@ -12,9 +12,14 @@ from app.managers.interview_session_manager import (
     InMemoryDurableInterviewRepository,
     InterviewSessionManager,
 )
+from app.pipelines.report_generation.pipeline import ReportGenerationPipeline
 from app.services.audio_understanding_service import (
     GeminiAudioUnderstandingService,
     MockAudioUnderstandingService,
+)
+from app.services.report_scoring_service import (
+    GeminiReportScoringService,
+    HeuristicReportScoringService,
 )
 
 
@@ -40,10 +45,20 @@ async def build_interview_session_manager(settings: Settings) -> InterviewSessio
             audio_model=settings.gemini_audio_model,
         )
 
+    report_scoring_service = HeuristicReportScoringService()
+    if settings.enable_gemini and settings.gemini_api_key:
+        report_scoring_service = GeminiReportScoringService(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_audio_model,
+        )
+
     manager = InterviewSessionManager(
         active_store=active_store,
         durable_repository=durable_repository,
         audio_understanding_service=audio_service,
+        report_generation_pipeline=ReportGenerationPipeline(
+            report_scoring_service=report_scoring_service,
+        ),
     )
     manager.redis_client = redis_client
     return manager

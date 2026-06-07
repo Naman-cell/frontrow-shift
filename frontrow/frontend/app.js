@@ -887,9 +887,15 @@ function renderReport(report) {
       <span>${escapeHtml(report.verdict || report.recommendation || "needs_review")} · role bar ${escapeHtml(report.role_bar || 70)}</span>
       <p>${escapeHtml(report.rationale || "")}</p>
     </div>
-    ${reportSection("Score Composition", composition.map((item) =>
-      reportItem(item.label, `${item.score_4}/4 · ${Math.round(item.weight * 100)}% · ${item.points} pts`, item.rationale)
-    ).join(""))}
+    ${reportSection("Score Composition", composition.map((item) => {
+      let html = reportItem(item.label, `${item.score_4}/4 · ${Math.round(item.weight * 100)}% · ${item.points} pts`, item.rationale);
+      if (item.skill_details && item.skill_details.length > 0) {
+        html += '<div style="margin-left:1.5em;opacity:0.85">' + item.skill_details.map((sd) =>
+          reportItem(sd.label, `${sd.score_4}/4 · ${sd.band}`, sd.weight_in_dimension > 0 ? `${Math.round(sd.weight_in_dimension * 100)}% of dimension` : "not assessed")
+        ).join("") + '</div>';
+      }
+      return html;
+    }).join(""))}
     ${reportSection("Skill To Role", skills.map((item) =>
       reportItem(item.label, item.assessed ? `${item.candidate_level_4}/4 · ${item.band}` : "Not assessed", `Target ${item.required_level_4}/4`)
     ).join(""))}

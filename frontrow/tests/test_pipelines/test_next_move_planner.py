@@ -57,10 +57,24 @@ def make_analysis(
     )
 
 
-def test_strong_answer_triggers_drill_down() -> None:
+def test_strong_answer_switches_when_most_skills_untouched() -> None:
+    """When >50% skills are untouched, prioritize breadth over drill-down."""
     planner = NextMovePlanner()
     state = make_state()
     state.skill_map.skills["python_concurrency"].attempts = 1
+
+    decision = planner.plan(state=state, analysis=make_analysis(AnswerQuality.STRONG))
+
+    assert decision.move_type == MoveType.SWITCH_ADJACENT_TOPIC
+
+
+def test_strong_answer_triggers_drill_down_after_coverage() -> None:
+    """When most skills are touched, drill-down on a strong answer."""
+    planner = NextMovePlanner()
+    state = make_state()
+    state.skill_map.skills["python_concurrency"].attempts = 1
+    state.skill_map.skills["api_design"].attempts = 1
+    state.skill_map.skills["system_design"].attempts = 1
 
     decision = planner.plan(state=state, analysis=make_analysis(AnswerQuality.STRONG))
 
@@ -126,6 +140,8 @@ def test_two_minute_interview_does_not_close_too_early() -> None:
     planner = NextMovePlanner()
     state = make_state(time_remaining_seconds=90, duration_minutes=2)
     state.skill_map.skills["python_concurrency"].attempts = 1
+    state.skill_map.skills["api_design"].attempts = 1
+    state.skill_map.skills["system_design"].attempts = 1
 
     decision = planner.plan(state=state, analysis=make_analysis(AnswerQuality.STRONG))
 
@@ -235,7 +251,8 @@ def test_low_signal_with_time_left_steps_back_to_role_fit_instead_of_ending() ->
     assert decision.should_end_interview is False
 
 
-def test_strong_answer_drills_down_before_broadening_coverage() -> None:
+def test_strong_answer_prioritizes_breadth_when_skills_untouched() -> None:
+    """Even after a strong answer, switch to untouched skills when coverage is low."""
     planner = NextMovePlanner()
     state = make_state()
     state.turns.append(
@@ -250,8 +267,7 @@ def test_strong_answer_drills_down_before_broadening_coverage() -> None:
 
     decision = planner.plan(state=state, analysis=make_analysis(AnswerQuality.STRONG))
 
-    assert decision.move_type == MoveType.DRILL_DOWN
-    assert decision.target_skill_id == "python_concurrency"
+    assert decision.move_type == MoveType.SWITCH_ADJACENT_TOPIC
 
 
 def test_adjacent_topic_prefers_untouched_skill_over_retesting_high_importance_skill() -> None:

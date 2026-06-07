@@ -1,11 +1,19 @@
 from fastapi import APIRouter, HTTPException
 
 from app.core.dependencies import InterviewSessionManagerDep
-from app.models.interview import InterviewSession, InterviewSessionCreate
+from app.models.interview import InterviewSession, InterviewSessionCreate, ReportFromTranscriptRequest
 from app.models.report import InterviewReport
 from app.models.websocket import WebSocketInboundPayload, WebSocketOutboundPayload
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
+
+
+@router.post("/report-from-transcript", response_model=InterviewReport)
+async def report_from_transcript(
+    payload: ReportFromTranscriptRequest,
+    manager: InterviewSessionManagerDep,
+) -> InterviewReport:
+    return await manager.generate_report_from_transcript(payload)
 
 
 @router.post("", response_model=InterviewSession)

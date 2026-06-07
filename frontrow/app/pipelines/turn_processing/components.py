@@ -9,7 +9,7 @@ os.environ.setdefault("HAYSTACK_TELEMETRY_ENABLED", "false")
 from haystack import component
 
 from app.models.evidence import EvidenceRecord, EvidenceSignalType
-from app.models.next_move import NextMoveDecision
+from app.models.next_move import MoveType, NextMoveDecision
 from app.models.skill_map import SkillStatus
 from app.models.state import InterviewState
 from app.models.turn import AnswerAnalysis, AnswerQuality, CandidateAnswer, InterviewTurn
@@ -272,15 +272,15 @@ class QuestionGeneratorNode:
         next_move: NextMoveDecision,
     ) -> dict:
         started_at = perf_counter()
-        question = (
-            next_move.interviewer_response
-            if next_move.should_end_interview
-            else fallback_question_from_move(
+        if next_move.should_end_interview:
+            question = next_move.interviewer_response
+        else:
+            question = fallback_question_from_move(
                 state=state,
                 analysis=analysis,
                 next_move=next_move,
             )
-        )
+            question = self._dedup_question(question, state, next_move)
 
         _record_metric(state, "question_generator_ms", started_at)
         return {
@@ -309,16 +309,16 @@ class QuestionGeneratorNode:
         next_move: NextMoveDecision,
     ) -> dict:
         started_at = perf_counter()
-        question = (
-            next_move.interviewer_response
-            if next_move.should_end_interview
-            else await self.service.generate_question(
+        if next_move.should_end_interview:
+            question = next_move.interviewer_response
+        else:
+            question = await self.service.generate_question(
                 state=state,
                 answer=answer,
                 analysis=analysis,
                 next_move=next_move,
             )
-        )
+            question = self._dedup_question(question, state, next_move)
 
         _record_metric(state, "question_generator_ms", started_at)
         return {
@@ -329,6 +329,30 @@ class QuestionGeneratorNode:
             "next_move": next_move,
             "next_question": question,
         }
+
+    def _dedup_question(
+        self,
+        question: str,
+        state: InterviewState,
+        next_move: NextMoveDecision,
+    ) -> str:
+        """If the question was already asked recently, substitute an alternative."""
+        recent_questions = {turn.question.strip().lower() for turn in state.turns[-4:]}
+        if question.strip().lower() not in recent_questions:
+            return question
+        LOGGER.warning(
+            "Duplicate question detected for interview=%s turn=%d; generating alternative.",
+            state.interview_id,
+            len(state.turns) + 1,
+        )
+        skill_label = next_move.target_skill_label
+        if next_move.move_type == MoveType.REPAIR_AND_REDIRECT:
+            return f"Let's try a different angle. Can you describe a specific situation where {skill_label} came up in your work?"
+        if next_move.move_type == MoveType.SCAFFOLD_RETRY:
+            return f"Even a small example would help. What is one thing you have done that involved {skill_label}?"
+        if next_move.move_type == MoveType.SWITCH_ADJACENT_TOPIC:
+            return f"Let's move on. Can you tell me about a time you worked with {skill_label}?"
+        return f"Could you share a different example related to {skill_label}?"
 
 
 @component

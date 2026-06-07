@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 from collections.abc import AsyncIterator
 
-import httpx
+import httpx2 as httpx
 
 
 class AzureSpeechVoiceError(RuntimeError):

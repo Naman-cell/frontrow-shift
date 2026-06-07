@@ -1,7 +1,7 @@
 from app.models.interview import RoleContext
 from app.models.state import InterviewState
 from app.models.turn import AnswerAnalysis, AnswerQuality, CandidateAnswer, CandidateIntent, InterviewTurn
-from app.pipelines.report_generation.pipeline import _answer_depth_score, _ownership_score
+from app.pipelines.report_generation.heuristics import answer_depth_score as _answer_depth_score, ownership_score as _ownership_score
 
 
 def test_refusal_and_interview_criticism_do_not_inflate_depth_or_ownership() -> None:

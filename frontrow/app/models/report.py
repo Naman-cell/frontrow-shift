@@ -20,6 +20,16 @@ class SkillBreakdown(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class SkillScoreDetail(BaseModel):
+    skill_id: str
+    label: str
+    score_4: float
+    target_4: float
+    band: str
+    weight_in_dimension: float
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class ScoreCompositionItem(BaseModel):
     dimension: str
     label: str
@@ -28,6 +38,7 @@ class ScoreCompositionItem(BaseModel):
     target_4: float
     points: float
     rationale: str
+    skill_details: list[SkillScoreDetail] = Field(default_factory=list)
 
 
 class CompetencyScorecardItem(BaseModel):

@@ -1,4 +1,5 @@
 import base64
+from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -37,12 +38,16 @@ async def interview_websocket(websocket: WebSocket, interview_id: str) -> None:
                     )
                 continue
 
+            audio_received_at = perf_counter()
             if payload.audio_stream_id and not payload.audio_base64:
                 chunks = audio_streams.pop(payload.audio_stream_id, [])
                 if chunks:
                     payload.audio_base64 = base64.b64encode(b"".join(chunks)).decode("ascii")
+            audio_assembly_ms = int((perf_counter() - audio_received_at) * 1000)
 
-            outbound = await manager.process_turn(interview_id, payload)
+            outbound = await manager.process_turn(
+                interview_id, payload, audio_assembly_ms=audio_assembly_ms,
+            )
             await websocket.send_json(outbound.model_dump(mode="json"))
             if outbound.completed:
                 await websocket.close()

@@ -79,6 +79,7 @@ class NextMovePlanner:
             )
 
         if low_signal_streak >= self.policy.max_low_signal_streak_before_wrap:
+            consecutive_role_fit = self._consecutive_role_fit_repairs(state)
             if not state.closing_question_sent and state.time_remaining_seconds <= closing_buffer_seconds:
                 role_fit = state.skill_map.get_or_create("candidate_questions", "Candidate questions")
                 return self._decision(
@@ -89,6 +90,27 @@ class NextMovePlanner:
                     alternatives_avoided=["end_without_candidate_closing_space", "keep_pressuring_candidate"],
                     time_consideration="closing buffer reached after low-signal turns",
                     interviewer_response="No problem, we do not need to stay stuck there.",
+                )
+            if consecutive_role_fit >= 2:
+                if not state.closing_question_sent:
+                    cq_skill = state.skill_map.get_or_create("candidate_questions", "Candidate questions")
+                    return self._decision(
+                        MoveType.CANDIDATE_QUESTIONS,
+                        cq_skill,
+                        "Candidate has not been able to provide signal across multiple role-fit redirects; offer closing space before ending.",
+                        evidence_used,
+                        alternatives_avoided=["keep_looping_on_role_fit", "keep_pressuring_candidate"],
+                        interviewer_response="That is completely fine.",
+                    )
+                wrap_skill = state.skill_map.next_coverage_target({target_skill.skill_id}) or target_skill
+                return self._decision(
+                    MoveType.WRAP_UP,
+                    wrap_skill,
+                    "Candidate has not been able to provide signal after repeated role-fit redirects; close gracefully.",
+                    evidence_used,
+                    alternatives_avoided=["keep_looping_on_role_fit", "keep_pressuring_candidate"],
+                    interviewer_response="That is completely fine, we can wrap up here. Thank you for your time.",
+                    should_end_interview=True,
                 )
             if state.time_remaining_seconds > closing_buffer_seconds:
                 role_fit = state.skill_map.get_or_create("role_fit", "Role fit and background")
@@ -244,6 +266,20 @@ class NextMovePlanner:
             )
 
         if analysis.quality in {AnswerQuality.STRONG, AnswerQuality.CONCRETE_EXPERIENCE}:
+            real_skills = [
+                s for s in state.skill_map.skills.values()
+                if s.skill_id not in {"candidate_questions", "role_fit"}
+            ]
+            untouched = sum(1 for s in real_skills if s.attempts == 0)
+            if untouched > 0 and untouched / max(len(real_skills), 1) > 0.5:
+                adjacent = state.skill_map.next_coverage_target({target_skill.skill_id}) or target_skill
+                return self._decision(
+                    MoveType.SWITCH_ADJACENT_TOPIC,
+                    adjacent,
+                    "Prioritizing breadth: more than half the required skills remain untouched.",
+                    evidence_used,
+                    alternatives_avoided=["drill_down_before_coverage"],
+                )
             if target_skill.attempts <= self.policy.max_same_skill_attempts and target_skill.target_depth != "low":
                 return self._decision(
                     MoveType.DRILL_DOWN,
@@ -348,10 +384,25 @@ class NextMovePlanner:
                 break
         return streak
 
+    def _consecutive_role_fit_repairs(self, state: InterviewState) -> int:
+        """Count how many recent consecutive turns were repair_and_redirect to role_fit."""
+        count = 0
+        for turn in reversed(state.turns):
+            if (
+                turn.next_move
+                and turn.next_move.move_type == MoveType.REPAIR_AND_REDIRECT
+                and turn.next_move.target_skill_id == "role_fit"
+            ):
+                count += 1
+            else:
+                break
+        return count
+
     def _candidate_wants_to_stop(self, analysis: AnswerAnalysis) -> bool:
         text = " ".join(
             part
             for part in [
+                analysis.transcript,
                 analysis.summary,
                 analysis.suggested_interviewer_response,
                 analysis.extracted_claim or "",
@@ -367,12 +418,24 @@ class NextMovePlanner:
             "stop the interview",
             "stop this interview",
             "end the interview",
+            "end this interview",
             "not continue",
             "no longer continue",
             "demanding to stop",
             "stop here",
             "end here",
+            "i want to stop",
+            "i dont feel like",
+            "i don't feel like",
+            "don't want to do this",
+            "dont want to do this",
+            "can we stop",
+            "please stop",
+            "i want to leave",
+            "let me go",
         ]
+        if analysis.intent in {CandidateIntent.DISENGAGED, CandidateIntent.FRUSTRATED}:
+            return True
         return any(phrase in text for phrase in stop_phrases)
 
     def _closing_response_after_candidate_space(

@@ -1,12 +1,16 @@
 import base64
 import json
+import logging
 from asyncio import Semaphore
+from time import perf_counter
 from typing import Any
 
 from app.models.interview import RoleContext
 from app.models.next_move import NextMoveDecision
 from app.models.state import InterviewState
 from app.models.turn import AnswerAnalysis, AnswerQuality, CandidateAnswer, CandidateIntent
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AudioUnderstandingService:
@@ -149,11 +153,22 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
                     mime_type=answer.audio_mime_type or "audio/webm",
                 )
             )
+        gemini_start = perf_counter()
         async with self.model_semaphore:
             response = await self.client.aio.models.generate_content(
                 model=self.audio_model,
                 contents=contents,
             )
+        gemini_ms = int((perf_counter() - gemini_start) * 1000)
+        LOGGER.info(
+            "gemini_analyze_answer interview=%s gemini_ms=%d has_audio=%s transcript_len=%d",
+            state.interview_id if state else "unknown",
+            gemini_ms,
+            bool(answer.audio_base64),
+            len(answer.transcript),
+        )
+        if state:
+            state.runtime_metrics["gemini_analyze_ms"] = gemini_ms
         parsed = _parse_json_response(getattr(response, "text", "") or "")
         quality = _coerce_quality(parsed.get("answer_quality"))
         intent = _coerce_intent(parsed.get("candidate_intent"))
@@ -198,6 +213,36 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
                 analysis=analysis,
                 next_move=next_move,
             )
+        try:
+            prompt = _question_generation_prompt(
+                role=state.role,
+                state=state,
+                analysis=analysis,
+                next_move=next_move,
+            )
+            gemini_start = perf_counter()
+            async with self.model_semaphore:
+                response = await self.client.aio.models.generate_content(
+                    model=self.audio_model,
+                    contents=prompt,
+                )
+            gemini_ms = int((perf_counter() - gemini_start) * 1000)
+            LOGGER.info(
+                "gemini_generate_question interview=%s gemini_ms=%d",
+                state.interview_id,
+                gemini_ms,
+            )
+            state.runtime_metrics["gemini_question_ms"] = gemini_ms
+            parsed = _parse_json_response(getattr(response, "text", "") or "")
+            question = str(parsed.get("question") or "").strip()
+            if question and len(question.split()) <= 50:
+                return _ensure_conversational_bridge(
+                    question=question,
+                    analysis=analysis,
+                    next_move=next_move,
+                )
+        except Exception:
+            LOGGER.exception("Gemini question generation failed; using fallback template.")
         question = fallback_question_from_move(state=state, analysis=analysis, next_move=next_move)
         return _ensure_conversational_bridge(
             question=question,
@@ -207,11 +252,18 @@ class GeminiAudioUnderstandingService(AudioUnderstandingService):
 
     async def generate_opening_question(self, *, state: InterviewState) -> str:
         prompt = _opening_question_prompt(state)
+        gemini_start = perf_counter()
         async with self.model_semaphore:
             response = await self.client.aio.models.generate_content(
                 model=self.audio_model,
                 contents=prompt,
             )
+        gemini_ms = int((perf_counter() - gemini_start) * 1000)
+        LOGGER.info(
+            "gemini_opening_question interview=%s gemini_ms=%d",
+            state.interview_id,
+            gemini_ms,
+        )
         parsed = _parse_json_response(getattr(response, "text", "") or "")
         question = str(parsed.get("question") or "").strip()
         return question or fallback_opening_question(state)

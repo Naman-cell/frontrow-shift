@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.endpoints import health, interviews, voice, websocket
+from app.api.v1.endpoints import health, interviews, pipeline, voice, websocket
 from app.core.config import get_settings
 from app.managers.interview_session_manager import InterviewSessionManager
 from app.pipelines.registry import clear_pipeline_registry, register_default_pipelines
@@ -48,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(interviews.router, prefix=settings.api_v1_prefix)
     app.include_router(websocket.router, prefix=settings.api_v1_prefix)
     app.include_router(voice.router, prefix=settings.api_v1_prefix)
+    app.include_router(pipeline.router, prefix=settings.api_v1_prefix)
     return app
 
 

@@ -57,7 +57,7 @@ class InterviewState(BaseModel):
 
     def seed_skills_from_role(self) -> None:
         for index, skill_label in enumerate(self.role.required_skills):
-            skill_id = skill_label.lower().replace(" ", "_").replace("/", "_")
+            skill_id = skill_label.lower().replace(" ", "_").replace("/", "_")[:60]
             importance = max(0.95 - (index * 0.08), 0.45)
             self.skill_map.skills.setdefault(
                 skill_id,
